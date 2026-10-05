@@ -1,6 +1,6 @@
 """本地客服工单中心命令行入口。
 
-仅支持工单的创建与查看，数据存储于本地 SQLite 文件。
+支持工单的创建、查看与结案，数据存储于本地 SQLite 文件。
 """
 
 import argparse
@@ -83,6 +83,37 @@ def show_ticket(conn, raw_id):
     return 0
 
 
+def close_ticket(conn, raw_id):
+    try:
+        ticket_id = int(raw_id)
+    except (TypeError, ValueError):
+        ticket_id = None
+    if ticket_id is None or ticket_id <= 0:
+        print("工单编号必须为正整数", file=sys.stderr)
+        return 1
+
+    row = conn.execute(
+        "SELECT id, title, description FROM tickets WHERE id = ?",
+        (ticket_id,),
+    ).fetchone()
+    if row is None:
+        print("工单不存在", file=sys.stderr)
+        return 1
+
+    conn.execute("UPDATE tickets SET status = ? WHERE id = ?", ("closed", ticket_id))
+    conn.commit()
+
+    print_ticket(
+        {
+            "id": row[0],
+            "title": row[1],
+            "description": row[2],
+            "status": "closed",
+        }
+    )
+    return 0
+
+
 def build_parser():
     parser = argparse.ArgumentParser(description="本地客服工单中心")
     parser.add_argument(
@@ -101,6 +132,9 @@ def build_parser():
     show_parser = subparsers.add_parser("show", help="按编号查看工单")
     show_parser.add_argument("id", help="工单编号（正整数）")
 
+    close_parser = subparsers.add_parser("close", help="按编号结案工单")
+    close_parser.add_argument("id", help="工单编号（正整数）")
+
     return parser
 
 
@@ -114,6 +148,8 @@ def main(argv=None):
             return create_ticket(conn, args.title, args.description)
         if args.command == "show":
             return show_ticket(conn, args.id)
+        if args.command == "close":
+            return close_ticket(conn, args.id)
         return 1
     finally:
         conn.close()
