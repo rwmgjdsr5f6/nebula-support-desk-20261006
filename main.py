@@ -114,6 +114,31 @@ def close_ticket(conn, raw_id):
     return 0
 
 
+def list_tickets(conn, status):
+    if status is None:
+        rows = conn.execute(
+            "SELECT id, title, description, status FROM tickets ORDER BY id"
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT id, title, description, status FROM tickets "
+            "WHERE status = ? ORDER BY id",
+            (status,),
+        ).fetchall()
+
+    tickets = [
+        {
+            "id": row[0],
+            "title": row[1],
+            "description": row[2],
+            "status": row[3],
+        }
+        for row in rows
+    ]
+    print(json.dumps(tickets, ensure_ascii=False))
+    return 0
+
+
 def build_parser():
     parser = argparse.ArgumentParser(description="本地客服工单中心")
     parser.add_argument(
@@ -135,6 +160,14 @@ def build_parser():
     close_parser = subparsers.add_parser("close", help="按编号结案工单")
     close_parser.add_argument("id", help="工单编号（正整数）")
 
+    list_parser = subparsers.add_parser("list", help="列出工单")
+    list_parser.add_argument(
+        "--status",
+        choices=["open", "closed"],
+        default=None,
+        help="按状态筛选（open 或 closed；不传则返回全部工单）",
+    )
+
     return parser
 
 
@@ -150,6 +183,8 @@ def main(argv=None):
             return show_ticket(conn, args.id)
         if args.command == "close":
             return close_ticket(conn, args.id)
+        if args.command == "list":
+            return list_tickets(conn, args.status)
         return 1
     finally:
         conn.close()
