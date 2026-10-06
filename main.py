@@ -130,17 +130,31 @@ def reopen_ticket(conn, raw_id):
     return 0
 
 
-def list_tickets(conn, status):
-    if status is None:
-        rows = conn.execute(
-            "SELECT id, title, description, status FROM tickets ORDER BY id"
-        ).fetchall()
-    else:
-        rows = conn.execute(
-            "SELECT id, title, description, status FROM tickets "
-            "WHERE status = ? ORDER BY id",
-            (status,),
-        ).fetchall()
+def list_tickets(conn, status, keyword):
+    # 关键字先去除首尾空白；显式传入空字符串或去除后为空时，
+    # 按使用错误处理（退出码 1），不进入查询
+    if keyword is not None:
+        keyword = keyword.strip()
+        if not keyword:
+            print("关键字不能为空", file=sys.stderr)
+            return 1
+
+    query = "SELECT id, title, description, status FROM tickets"
+    conditions = []
+    params = []
+    if status is not None:
+        conditions.append("status = ?")
+        params.append(status)
+    if keyword:
+        # 用 instr 做区分大小写的连续字面子串匹配：关键字作为绑定参数，
+        # 其中的 %、_、\、引号与内部空白均按原字符比较，不作为通配符
+        conditions.append("(instr(title, ?) > 0 OR instr(description, ?) > 0)")
+        params.extend((keyword, keyword))
+    if conditions:
+        query += " WHERE " + " AND ".join(conditions)
+    query += " ORDER BY id"
+
+    rows = conn.execute(query, params).fetchall()
 
     tickets = [
         {
@@ -186,6 +200,11 @@ def build_parser():
         default=None,
         help="按状态筛选（open 或 closed；不传则返回全部工单）",
     )
+    list_parser.add_argument(
+        "--keyword",
+        default=None,
+        help="按标题或描述中的连续关键字筛选（区分大小写的字面子串匹配）",
+    )
 
     return parser
 
@@ -205,7 +224,7 @@ def main(argv=None):
         if args.command == "reopen":
             return reopen_ticket(conn, args.id)
         if args.command == "list":
-            return list_tickets(conn, args.status)
+            return list_tickets(conn, args.status, args.keyword)
         return 1
     finally:
         conn.close()
