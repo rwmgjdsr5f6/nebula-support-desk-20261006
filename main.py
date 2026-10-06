@@ -108,6 +108,20 @@ def close_ticket(conn, raw_id):
     return 0
 
 
+def reopen_ticket(conn, raw_id):
+    row = find_ticket(conn, raw_id)
+    if row is None:
+        return 1
+
+    conn.execute("UPDATE tickets SET status = ? WHERE id = ?", ("open", row[0]))
+    conn.commit()
+
+    ticket = row_to_ticket(row)
+    ticket["status"] = "open"
+    print_ticket(ticket)
+    return 0
+
+
 def list_tickets(conn, status):
     if status is None:
         rows = conn.execute(
@@ -154,6 +168,9 @@ def build_parser():
     close_parser = subparsers.add_parser("close", help="按编号结案工单")
     close_parser.add_argument("id", help="工单编号（正整数）")
 
+    reopen_parser = subparsers.add_parser("reopen", help="按编号重新打开工单")
+    reopen_parser.add_argument("id", help="工单编号（正整数）")
+
     list_parser = subparsers.add_parser("list", help="列出工单")
     list_parser.add_argument(
         "--status",
@@ -177,6 +194,8 @@ def main(argv=None):
             return show_ticket(conn, args.id)
         if args.command == "close":
             return close_ticket(conn, args.id)
+        if args.command == "reopen":
+            return reopen_ticket(conn, args.id)
         if args.command == "list":
             return list_tickets(conn, args.status)
         return 1
