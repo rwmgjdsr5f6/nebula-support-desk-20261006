@@ -10,6 +10,9 @@ import sys
 
 DEFAULT_DB = "tickets.sqlite"
 
+# SQLite INTEGER 主键可保存的最大值；超过此值的编号按不存在的工单处理
+MAX_SQLITE_INT = 9223372036854775807
+
 
 def connect(db_path):
     """打开（必要时创建）数据库并确保工单表存在。"""
@@ -63,6 +66,10 @@ def find_ticket(conn, raw_id):
         ticket_id = None
     if ticket_id is None or ticket_id <= 0:
         print("工单编号必须为正整数", file=sys.stderr)
+        return None
+    if ticket_id > MAX_SQLITE_INT:
+        # 超出 SQLite 可保存范围的编号不可能对应任何工单
+        print("工单不存在", file=sys.stderr)
         return None
 
     row = conn.execute(
