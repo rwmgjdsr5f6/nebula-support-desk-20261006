@@ -1,0 +1,250 @@
+本地客服工单中心：创建工单并按编号重新查看的流程说明
+========================================================
+
+本文依据项目当前源码（main.py）、README.md 与公开用法整理，仅覆盖
+"创建工单 → 按编号重新查看"这一条最小受理流程。分类、分派、回复草稿、
+时限等其他流程不在本文范围（README 第 5 行亦注明"暂不支持分派、回复"，
+源码中亦无对应入口）。本文不修改任何源码、README 或数据库内容，所有结论
+均可在所引用的文件与行号处核对；源码未规定的内容明确标注"未规定"。
+
+文中统一使用一个固定合成问题作为样例：
+  标题：打印机无法连接
+  描述：更换网络后无法打印
+
+
+一、结论总览
+------------
+
+1. 创建工单入口：已实现。命令为 `create`，对应 main.py 的 create_ticket
+   函数（main.py:36-55）。
+2. 按编号查看入口：已实现。命令为 `show`，对应 main.py 的 show_ticket
+   函数（main.py:58-83）。
+3. 因此"创建工单后按编号重新查看"的完整流程在当前源码中已具备，
+   且两次运行通过同一个 SQLite 数据库文件衔接（见第五节）。
+4. 项目另有 `close`（结案）入口（main.py:86-114），存在但不属于本文
+   范围，本文不对其展开。
+
+
+二、代码地图（本文涉及的全部位置）
+----------------------------------
+
+- main.py:11        DEFAULT_DB = "tickets.sqlite"，默认数据库文件名
+- main.py:14-28     connect(db_path)：打开（必要时创建）数据库并确保表存在
+- main.py:19-25     CREATE TABLE IF NOT EXISTS tickets 语句，定义表结构
+- main.py:31-33     print_ticket(ticket)：把工单作为唯一 JSON 对象打印到
+                    标准输出（json.dumps，ensure_ascii=False，中文不转义）
+- main.py:36-55     create_ticket(conn, title, description)：创建工单
+- main.py:58-83     show_ticket(conn, raw_id)：按编号查看工单
+- main.py:117-138   build_parser()：定义命令行语法（--db、create、show、close）
+- main.py:141-155   main(argv=None)：解析参数、连接数据库、分发命令、关闭连接
+- main.py:158-159   入口：sys.exit(main())，main 的返回值即进程退出码
+
+数据库表结构（main.py:19-25 的 CREATE TABLE IF NOT EXISTS 语句）：
+  id          INTEGER PRIMARY KEY AUTOINCREMENT
+  title       TEXT NOT NULL
+  description TEXT NOT NULL
+  status      TEXT NOT NULL
+
+
+三、创建工单的完整路径（命令行输入 → 字段检查 → SQLite 写入 → 输出）
+--------------------------------------------------------------------
+
+1. 进入程序：命令行 `python main.py [--db 路径] create --title T --description D`
+   由 main.py:158-159 的 `sys.exit(main())` 进入 main()（main.py:141）。
+2. 参数解析：main() 调用 build_parser()（main.py:117-138）并用
+   parser.parse_args 解析（main.py:143）。`create` 子命令在
+   main.py:126-130 定义：
+   - `--title`：默认值为空字符串 ""（main.py:127）；
+   - `--description`：默认值为空字符串 ""（main.py:128-130）。
+3. 连接数据库：main.py:145 调用 connect(args.db)。connect（main.py:14-28）
+   用 sqlite3.connect 打开数据库文件（不存在则创建），并执行
+   CREATE TABLE IF NOT EXISTS 后 commit。注意：连接对象是进程内的，
+   进程结束即由 main.py:154-155 的 finally 关闭；持久化依据只有磁盘上的
+   SQLite 文件本身，不存在任何进程内对象充当持久化存储。
+4. 命令分发：main.py:147-148 判断 args.command == "create" 后调用
+   create_ticket(conn, args.title, args.description)。
+5. 字段检查（main.py:37-40）：对 title 调用 strip() 去除首尾空白；
+   若结果为空字符串，向标准错误打印"标题不能为空"并返回 1（不写入
+   数据库）。description 不做任何检查或修改，按原文处理（允许空字符串，
+   与 README 第 33 行一致）。
+6. SQLite 写入（main.py:42-46）：执行
+     INSERT INTO tickets (title, description, status) VALUES (?, ?, ?)
+   参数为 (去除首尾空白后的 title, 原文 description, "open")，随后
+   conn.commit()。标题保存到 tickets 表的 title 列，问题描述保存到
+   description 列。
+7. 编号的获得：插入时未指定 id，由 SQLite 的
+   INTEGER PRIMARY KEY AUTOINCREMENT（main.py:20）自动分配；代码通过
+   cursor.lastrowid（main.py:49）取回该编号并放入输出。编号由数据库
+   生成，对同一数据库文件唯一且重新运行后保持稳定；具体数值取决于该
+   数据库已有的插入历史，源码不保证任何固定首值（对一个全新数据库的
+   首条记录，SQLite AUTOINCREMENT 实际会给出 1，README 第 34 行也如此
+   描述，但本文样例不依赖这一点）。
+8. 初始状态的确定：状态不是来自命令行参数，而是在 main.py:44 的 INSERT
+   语句中硬编码为字符串 "open"，并保存到 tickets 表的 status 列。
+9. 输出结果（main.py:47-54）：create_ticket 调用 print_ticket
+   （main.py:31-33），向标准输出打印唯一一行 JSON 对象，字段为
+   id（整数）、title（去空白后的标题）、description（原文描述）、
+   status（"open"），随后返回 0。main 的返回值经 main.py:159 的
+   sys.exit 成为进程退出码，即成功时退出码为 0。
+
+
+四、按编号查看工单的完整路径
+----------------------------
+
+1. 进入程序：`python main.py [--db 路径] show 编号`，同样经
+   main.py:158-159 → main() → build_parser()。`show` 子命令在
+   main.py:132-133 定义，接受一个位置参数 id（字符串形式传入）。
+2. 连接数据库：与创建完全相同，main.py:145 调用 connect(args.db)。
+3. 命令分发：main.py:149-150 调用 show_ticket(conn, args.id)。
+4. 编号解析与检查（main.py:59-65）：对传入字符串调用 Python 的 int()
+   转换；int() 抛出 TypeError 或 ValueError 时被捕获（main.py:61），
+   ticket_id 置为 None。若 ticket_id 为 None 或不大于 0，向标准错误
+   打印"工单编号必须为正整数"并返回 1（不查询数据库）。解析语义完全
+   等同于 Python 内置 int()，除此之外源码未规定其它格式规则。
+5. SQLite 读取（main.py:67-70）：执行
+     SELECT id, title, description, status FROM tickets WHERE id = ?
+   并 fetchone()。这是只读查询，不修改任何工单数据。
+6. 未命中处理（main.py:71-73）：若查询结果为空（编号为正整数但无对应
+   记录），向标准错误打印"工单不存在"并返回 1。
+7. 输出结果（main.py:75-82）：命中时调用 print_ticket 打印唯一一行
+   JSON 对象，四个字段 id、title、description、status 依次取自数据库
+   行的第 1 至第 4 列，即创建时保存的内容（状态若未被 close 改动，
+   仍为创建时写入的 "open"）。返回 0，进程退出码为 0。
+
+
+五、两次运行如何选择同一数据库
+------------------------------
+
+创建与查看是两个独立进程，二者唯一的衔接是磁盘上的同一个 SQLite 文件：
+
+1. 全局选项 `--db`（main.py:119-123）显式指定数据库文件路径。只要两次
+   运行传入相同的 --db 值，就操作同一数据库。
+2. 未提供 --db 时使用默认值 DEFAULT_DB = "tickets.sqlite"（main.py:11，
+   默认值在 main.py:121 生效）。这是一个相对路径，由 sqlite3.connect
+   相对于进程的当前工作目录解析（README 第 22 行亦如此描述）。因此
+   省略 --db 时，两次运行必须在同一当前工作目录下执行，才能命中同一
+   数据库文件；工作目录不同则指向不同文件。
+3. 数据库文件不存在时由 connect（main.py:16 的 sqlite3.connect）自动
+   创建，并执行 CREATE TABLE IF NOT EXISTS（main.py:17-26）。这意味着
+   对一个尚不存在的路径执行 show，也会创建出空库文件，随后因查无记录
+   报"工单不存在"。
+4. 每个进程各自调用 connect 建立自己的连接，并在结束时关闭
+   （main.py:154-155）。编号、标题、描述、状态的持久化完全依赖 SQLite
+   文件；源码中没有任何进程内对象在两次运行之间传递数据。
+
+
+六、固定样例的最小操作示例
+--------------------------
+
+以下示例使用当前公开语法，标题"打印机无法连接"、描述"更换网络后无法
+打印"。示例显式给出 --db 以保证两次运行选中同一数据库；若在相同工作
+目录下执行，也可两次都省略 --db（默认 tickets.sqlite）。样例不假定
+数据库为空，也不假定首个编号为任何固定值。
+
+第 1 步（进程一，创建）：
+
+  python main.py --db demo.sqlite create --title "打印机无法连接" --description "更换网络后无法打印"
+
+  成功时退出码 0，标准输出为唯一一行 JSON，形如（编号以占位符表示）：
+
+  {"id": <编号>, "title": "打印机无法连接", "description": "更换网络后无法打印", "status": "open"}
+
+  其中 <编号> 是数据库实际分配的正整数，请以本次输出的真实值为准。
+  输出字段与保存内容的对应关系：title 取自 tickets.title（去首尾空白
+  后的标题）、description 取自 tickets.description（原文描述）、
+  status 取自创建时硬编码写入的 "open"（main.py:44、49-53）。
+
+第 2 步（进程二，查看；把 <编号> 替换为第 1 步实际输出的整数）：
+
+  python main.py --db demo.sqlite show <编号>
+
+  成功时退出码 0，标准输出为唯一一行 JSON：
+
+  {"id": <编号>, "title": "打印机无法连接", "description": "更换网络后无法打印", "status": "open"}
+
+  各字段直接来自数据库行（main.py:67-82），因此在未执行过 close 的
+  情况下，标题、描述、状态应与创建时保存的内容逐项一致。
+
+
+七、错误路径追踪
+----------------
+
+1. 空标题（含全空白标题、或未提供 --title 而落到默认值 ""）：
+   - 路径：create_ticket（main.py:37-40），title.strip() 结果为空。
+   - 行为：向标准错误打印"标题不能为空"，函数返回 1，进程退出码为 1；
+     不执行 INSERT，数据库内容不变。
+   - 异常类型：无异常抛出；这是正常返回错误码的路径，源码未规定任何
+     异常。
+2. 未知编号（编号是正整数但数据库中无此记录，如 show 999）：
+   - 路径：show_ticket（main.py:67-73），SELECT 返回空行。
+   - 行为：向标准错误打印"工单不存在"，函数返回 1，进程退出码为 1；
+     标准输出为空。
+   - 异常类型：无异常抛出。
+3. 编号不是正整数（如 abc、0、-1）：
+   - 路径：show_ticket（main.py:59-65）。int() 转换失败时抛出的
+     ValueError（或 TypeError）在 main.py:61 被捕获，不外传。
+   - 行为：向标准错误打印"工单编号必须为正整数"，返回 1，退出码 1。
+   - 异常类型：内部捕获 ValueError/TypeError；对进程外部表现为正常
+     退出码 1，无异常 traceback。
+4. 命令行语法错误（如 show 缺少编号、出现未识别参数、未给子命令）：
+   - 由 argparse 处理（main.py:143；子命令 required=True 见
+     main.py:124），argparse 向标准错误打印用法提示并以退出码 2
+     终止进程。README 第 76 行对 close 描述了同样的行为，与 argparse
+     的默认行为一致。
+5. 数据库文件无法打开（如 --db 指向的父目录不存在或不可写）：
+   - README 第 23 行要求"其父目录已存在且可读写"，但源码没有对应的
+     检查或友好报错：sqlite3.connect（main.py:16）失败时抛出的
+     sqlite3.OperationalError 未被捕获，进程将以未处理异常结束
+     （Python 默认退出码为 1，标准错误为 traceback）。除上述之外，
+     源码未规定其它行为。
+
+
+八、README 与源码的对照及差异
+-----------------------------
+
+逐条核对结果（README 行号对应 README.md）：
+
+1. README 第 16 行用法 `python main.py [--db 数据库文件] <命令> [参数]`
+   与 build_parser（main.py:117-138）一致。
+2. README 第 21-24 行关于 --db、默认 tickets.sqlite、自动创建、不同
+   --db 数据独立的描述，与 main.py:11、119-123 及 connect（main.py:
+   14-28）一致。
+3. README 第 32-33 行"标题去首尾空白后为空则拒绝；有效标题去空白后
+   保存；描述按原文保存、允许空字符串"，与 main.py:37-40、42-45 一致。
+4. README 第 34 行"唯一正整数编号、新数据库首条编号为 1、初始状态
+   open"，与 main.py:20（AUTOINCREMENT）、44（硬编码 "open"）、49
+   （lastrowid）一致。注意"首条编号为 1"是 SQLite 对全新数据库的实际
+   行为，源码本身并未显式保证首值。
+5. README 第 35-39 行成功输出为单个 JSON 对象、四字段、中文不转义，
+   与 print_ticket（main.py:31-33，ensure_ascii=False）及各调用点
+   一致。
+6. README 第 47-48 行"show 返回对应工单，不改变任何数据"，与
+   show_ticket 只执行 SELECT（main.py:67-70）一致。补充：show 仍会
+   经 connect 执行 CREATE TABLE IF NOT EXISTS（main.py:17-26），对
+   不存在的数据库路径会创建空库文件；这不改变已有工单数据，与 README
+   第 76 行"不存在的数据库按既有规则自动创建"不矛盾。
+7. README 第 64-76 行错误表（标题不能为空 / 工单编号必须为正整数 /
+   工单不存在，退出码 1；语法错误退出码 2）与 main.py:39、64、72 及
+   argparse 默认行为一致。
+8. 差异与需同时记录的点：
+   a. README 第 23 行"要求其父目录已存在且可读写"是文档对使用者的
+      要求，源码并未实现该检查；实际行为是未捕获的
+      sqlite3.OperationalError（见第七节第 5 条）。双方内容如上，
+      以源码实际行为为准，本文不修改 README。
+   b. README 未提及"对不存在的数据库路径执行 show 会创建空库文件"
+      这一细节；源码行为见 connect（main.py:14-28），本说明按源码
+      记录。
+   c. 除上述外，未发现 README 与源码相矛盾的陈述。
+
+
+九、未实现与未规定事项汇总
+--------------------------
+
+1. 未实现（源码中不存在对应入口）：工单的分类、分派、回复草稿、时限
+   管理等流程；README 第 5 行亦注明"暂不支持分派、回复"。这些属于
+   总目标中的预期，当前没有任何命令、函数或数据库字段支持。
+2. 未规定（源码未给出明确行为，本文不作推测）：
+   - description 的字段检查规则（源码对其完全不做校验，仅默认 ""）；
+   - 编号字符串除 Python int() 语义以外的格式约定；
+   - 数据库文件无法打开时的友好错误信息（仅有未捕获异常）；
+   - 并发进程同时写入同一数据库时的行为（源码无任何并发控制）。
