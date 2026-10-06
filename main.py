@@ -55,14 +55,23 @@ def create_ticket(conn, title, description):
     return 0
 
 
-def show_ticket(conn, raw_id):
+def parse_ticket_id(raw_id):
+    """将命令行编号参数解析为正整数，无法解析或非正数时返回 None。"""
     try:
         ticket_id = int(raw_id)
     except (TypeError, ValueError):
-        ticket_id = None
-    if ticket_id is None or ticket_id <= 0:
+        return None
+    if ticket_id <= 0:
+        return None
+    return ticket_id
+
+
+def fetch_ticket(conn, raw_id):
+    """按编号取出工单字典；编号非法或工单不存在时打印错误并返回 None。"""
+    ticket_id = parse_ticket_id(raw_id)
+    if ticket_id is None:
         print("工单编号必须为正整数", file=sys.stderr)
-        return 1
+        return None
 
     row = conn.execute(
         "SELECT id, title, description, status FROM tickets WHERE id = ?",
@@ -70,47 +79,35 @@ def show_ticket(conn, raw_id):
     ).fetchone()
     if row is None:
         print("工单不存在", file=sys.stderr)
+        return None
+
+    return {
+        "id": row[0],
+        "title": row[1],
+        "description": row[2],
+        "status": row[3],
+    }
+
+
+def show_ticket(conn, raw_id):
+    ticket = fetch_ticket(conn, raw_id)
+    if ticket is None:
         return 1
 
-    print_ticket(
-        {
-            "id": row[0],
-            "title": row[1],
-            "description": row[2],
-            "status": row[3],
-        }
-    )
+    print_ticket(ticket)
     return 0
 
 
 def close_ticket(conn, raw_id):
-    try:
-        ticket_id = int(raw_id)
-    except (TypeError, ValueError):
-        ticket_id = None
-    if ticket_id is None or ticket_id <= 0:
-        print("工单编号必须为正整数", file=sys.stderr)
+    ticket = fetch_ticket(conn, raw_id)
+    if ticket is None:
         return 1
 
-    row = conn.execute(
-        "SELECT id, title, description, status FROM tickets WHERE id = ?",
-        (ticket_id,),
-    ).fetchone()
-    if row is None:
-        print("工单不存在", file=sys.stderr)
-        return 1
-
-    conn.execute("UPDATE tickets SET status = ? WHERE id = ?", ("closed", ticket_id))
+    conn.execute("UPDATE tickets SET status = ? WHERE id = ?", ("closed", ticket["id"]))
     conn.commit()
 
-    print_ticket(
-        {
-            "id": row[0],
-            "title": row[1],
-            "description": row[2],
-            "status": "closed",
-        }
-    )
+    ticket["status"] = "closed"
+    print_ticket(ticket)
     return 0
 
 
