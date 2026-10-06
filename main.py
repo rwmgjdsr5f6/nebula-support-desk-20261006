@@ -1,6 +1,6 @@
 """本地客服工单中心命令行入口。
 
-支持工单的创建、查看与结案，数据存储于本地 SQLite 文件。
+支持工单的创建、查看、结案、重开、内部备注与列表筛选，数据存储于本地 SQLite 文件。
 """
 
 import argparse
@@ -24,6 +24,19 @@ def connect(db_path):
             title TEXT NOT NULL,
             description TEXT NOT NULL,
             status TEXT NOT NULL
+        )
+        """
+    )
+    # 备注编号在每张工单内从 1 开始递增：UNIQUE(ticket_id, note_id)
+    # 兜底，note_id 由代码按该工单当前最大值加 1 计算
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS ticket_notes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ticket_id INTEGER NOT NULL,
+            note_id INTEGER NOT NULL,
+            text TEXT NOT NULL,
+            UNIQUE (ticket_id, note_id)
         )
         """
     )
@@ -125,6 +138,54 @@ def reopen_ticket(conn, raw_id):
     return set_ticket_status(conn, raw_id, "open")
 
 
+def note_to_dict(ticket_id, note_id, text):
+    """构造对外输出的备注字典：仅含 note_id、ticket_id、text。"""
+    return {"note_id": note_id, "ticket_id": ticket_id, "text": text}
+
+
+def add_note(conn, raw_id, text):
+    """确认工单存在后追加一条内部备注，编号在该工单内从 1 递增。"""
+    row = find_ticket(conn, raw_id)
+    if row is None:
+        return 1
+
+    # 工单存在后才校验内容：空字符串或去除首尾空白后为空一律拒绝
+    if text is None or not text.strip():
+        print("备注不能为空", file=sys.stderr)
+        return 1
+
+    ticket_id = row[0]
+    row_max = conn.execute(
+        "SELECT MAX(note_id) FROM ticket_notes WHERE ticket_id = ?",
+        (ticket_id,),
+    ).fetchone()
+    next_note_id = (row_max[0] or 0) + 1
+    conn.execute(
+        "INSERT INTO ticket_notes (ticket_id, note_id, text) VALUES (?, ?, ?)",
+        (ticket_id, next_note_id, text),
+    )
+    conn.commit()
+
+    print(json.dumps(note_to_dict(ticket_id, next_note_id, text), ensure_ascii=False))
+    return 0
+
+
+def list_notes(conn, raw_id):
+    """按 note_id 升序输出工单的全部备注；无备注时输出 []。"""
+    row = find_ticket(conn, raw_id)
+    if row is None:
+        return 1
+
+    ticket_id = row[0]
+    rows = conn.execute(
+        "SELECT note_id, text FROM ticket_notes WHERE ticket_id = ? ORDER BY note_id",
+        (ticket_id,),
+    ).fetchall()
+    notes = [note_to_dict(ticket_id, note_row[0], note_row[1]) for note_row in rows]
+    print(json.dumps(notes, ensure_ascii=False))
+    return 0
+
+
 def list_tickets(conn, status, keyword):
     # 关键字先去除首尾空白；显式传入空字符串或去除后为空时，
     # 按使用错误处理（退出码 1），不进入查询
@@ -188,6 +249,17 @@ def build_parser():
     reopen_parser = subparsers.add_parser("reopen", help="按编号重新打开工单")
     reopen_parser.add_argument("id", help="工单编号（正整数）")
 
+    add_note_parser = subparsers.add_parser("add-note", help="为工单追加内部备注")
+    add_note_parser.add_argument("id", help="工单编号（正整数）")
+    add_note_parser.add_argument(
+        "--text",
+        required=True,
+        help="备注内容（按原文保存；空字符串或去除首尾空白后为空时拒绝）",
+    )
+
+    notes_parser = subparsers.add_parser("notes", help="按编号列出工单的内部备注")
+    notes_parser.add_argument("id", help="工单编号（正整数）")
+
     list_parser = subparsers.add_parser("list", help="列出工单")
     list_parser.add_argument(
         "--status",
@@ -218,6 +290,10 @@ def main(argv=None):
             return close_ticket(conn, args.id)
         if args.command == "reopen":
             return reopen_ticket(conn, args.id)
+        if args.command == "add-note":
+            return add_note(conn, args.id, args.text)
+        if args.command == "notes":
+            return list_notes(conn, args.id)
         if args.command == "list":
             return list_tickets(conn, args.status, args.keyword)
         return 1
