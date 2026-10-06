@@ -102,32 +102,27 @@ def show_ticket(conn, raw_id):
     return 0
 
 
-def close_ticket(conn, raw_id):
+def set_ticket_status(conn, raw_id, status):
+    """查找工单并将其状态更新为 status，输出更新后的工单。"""
     row = find_ticket(conn, raw_id)
     if row is None:
         return 1
 
-    conn.execute("UPDATE tickets SET status = ? WHERE id = ?", ("closed", row[0]))
+    conn.execute("UPDATE tickets SET status = ? WHERE id = ?", (status, row[0]))
     conn.commit()
 
     ticket = row_to_ticket(row)
-    ticket["status"] = "closed"
+    ticket["status"] = status
     print_ticket(ticket)
     return 0
+
+
+def close_ticket(conn, raw_id):
+    return set_ticket_status(conn, raw_id, "closed")
 
 
 def reopen_ticket(conn, raw_id):
-    row = find_ticket(conn, raw_id)
-    if row is None:
-        return 1
-
-    conn.execute("UPDATE tickets SET status = ? WHERE id = ?", ("open", row[0]))
-    conn.commit()
-
-    ticket = row_to_ticket(row)
-    ticket["status"] = "open"
-    print_ticket(ticket)
-    return 0
+    return set_ticket_status(conn, raw_id, "open")
 
 
 def list_tickets(conn, status, keyword):
