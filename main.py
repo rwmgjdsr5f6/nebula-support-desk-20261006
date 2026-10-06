@@ -1,6 +1,7 @@
 """本地客服工单中心命令行入口。
 
-支持工单的创建、查看与结案，数据存储于本地 SQLite 文件。
+支持工单的创建、查看、结案、重开、列表筛选与内部备注，
+数据存储于本地 SQLite 文件。
 """
 
 import argparse
@@ -24,6 +25,16 @@ def connect(db_path):
             title TEXT NOT NULL,
             description TEXT NOT NULL,
             status TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS notes (
+            ticket_id INTEGER NOT NULL,
+            note_id INTEGER NOT NULL,
+            text TEXT NOT NULL,
+            PRIMARY KEY (ticket_id, note_id)
         )
         """
     )
@@ -164,6 +175,48 @@ def list_tickets(conn, status, keyword):
     return 0
 
 
+def add_note(conn, raw_id, text):
+    """确认工单存在后为该工单追加一条内部备注。"""
+    row = find_ticket(conn, raw_id)
+    if row is None:
+        return 1
+
+    if not text.strip():
+        print("备注不能为空", file=sys.stderr)
+        return 1
+
+    ticket_id = row[0]
+    next_id = conn.execute(
+        "SELECT COALESCE(MAX(note_id), 0) + 1 FROM notes WHERE ticket_id = ?",
+        (ticket_id,),
+    ).fetchone()[0]
+    conn.execute(
+        "INSERT INTO notes (ticket_id, note_id, text) VALUES (?, ?, ?)",
+        (ticket_id, next_id, text),
+    )
+    conn.commit()
+    print(json.dumps({"note_id": next_id, "ticket_id": ticket_id, "text": text}, ensure_ascii=False))
+    return 0
+
+
+def list_notes(conn, raw_id):
+    """按 note_id 升序输出指定工单的全部内部备注。"""
+    row = find_ticket(conn, raw_id)
+    if row is None:
+        return 1
+
+    rows = conn.execute(
+        "SELECT note_id, text FROM notes WHERE ticket_id = ? ORDER BY note_id",
+        (row[0],),
+    ).fetchall()
+    notes = [
+        {"note_id": note_id, "ticket_id": row[0], "text": text}
+        for note_id, text in rows
+    ]
+    print(json.dumps(notes, ensure_ascii=False))
+    return 0
+
+
 def build_parser():
     parser = argparse.ArgumentParser(description="本地客服工单中心")
     parser.add_argument(
@@ -201,6 +254,17 @@ def build_parser():
         help="按标题或描述中的连续关键字筛选（区分大小写的字面子串匹配）",
     )
 
+    add_note_parser = subparsers.add_parser("add-note", help="为工单追加内部备注")
+    add_note_parser.add_argument("id", help="工单编号（正整数）")
+    add_note_parser.add_argument(
+        "--text",
+        required=True,
+        help="备注内容（非空；首尾空白、换行与引号均原样保存）",
+    )
+
+    notes_parser = subparsers.add_parser("notes", help="按编号列出工单的全部内部备注")
+    notes_parser.add_argument("id", help="工单编号（正整数）")
+
     return parser
 
 
@@ -220,6 +284,10 @@ def main(argv=None):
             return reopen_ticket(conn, args.id)
         if args.command == "list":
             return list_tickets(conn, args.status, args.keyword)
+        if args.command == "add-note":
+            return add_note(conn, args.id, args.text)
+        if args.command == "notes":
+            return list_notes(conn, args.id)
         return 1
     finally:
         conn.close()
