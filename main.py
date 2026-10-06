@@ -130,7 +130,13 @@ def reopen_ticket(conn, raw_id):
     return 0
 
 
-def list_tickets(conn, status):
+def list_tickets(conn, status, keyword):
+    if keyword is not None:
+        keyword = keyword.strip()
+        if not keyword:
+            print("关键字不能为空", file=sys.stderr)
+            return 1
+
     if status is None:
         rows = conn.execute(
             "SELECT id, title, description, status FROM tickets ORDER BY id"
@@ -141,6 +147,15 @@ def list_tickets(conn, status):
             "WHERE status = ? ORDER BY id",
             (status,),
         ).fetchall()
+
+    if keyword is not None:
+        # 区分大小写的连续字面子串匹配，标题或描述任一处命中即可；
+        # 不使用 LIKE/通配符，关键字中的所有字符均按原字符比较
+        rows = [
+            row
+            for row in rows
+            if keyword in row[1] or keyword in row[2]
+        ]
 
     tickets = [
         {
@@ -186,6 +201,11 @@ def build_parser():
         default=None,
         help="按状态筛选（open 或 closed；不传则返回全部工单）",
     )
+    list_parser.add_argument(
+        "--keyword",
+        default=None,
+        help="按标题或描述中的关键字筛选（区分大小写的字面子串匹配）",
+    )
 
     return parser
 
@@ -205,7 +225,7 @@ def main(argv=None):
         if args.command == "reopen":
             return reopen_ticket(conn, args.id)
         if args.command == "list":
-            return list_tickets(conn, args.status)
+            return list_tickets(conn, args.status, args.keyword)
         return 1
     finally:
         conn.close()
