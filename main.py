@@ -55,14 +55,15 @@ def create_ticket(conn, title, description):
     return 0
 
 
-def show_ticket(conn, raw_id):
+def find_ticket(conn, raw_id):
+    """校验编号并查找工单；失败时打印错误并返回 None。"""
     try:
         ticket_id = int(raw_id)
     except (TypeError, ValueError):
         ticket_id = None
     if ticket_id is None or ticket_id <= 0:
         print("工单编号必须为正整数", file=sys.stderr)
-        return 1
+        return None
 
     row = conn.execute(
         "SELECT id, title, description, status FROM tickets WHERE id = ?",
@@ -70,47 +71,40 @@ def show_ticket(conn, raw_id):
     ).fetchone()
     if row is None:
         print("工单不存在", file=sys.stderr)
+        return None
+    return row
+
+
+def row_to_ticket(row):
+    """将查询行转换为对外输出的工单字典。"""
+    return {
+        "id": row[0],
+        "title": row[1],
+        "description": row[2],
+        "status": row[3],
+    }
+
+
+def show_ticket(conn, raw_id):
+    row = find_ticket(conn, raw_id)
+    if row is None:
         return 1
 
-    print_ticket(
-        {
-            "id": row[0],
-            "title": row[1],
-            "description": row[2],
-            "status": row[3],
-        }
-    )
+    print_ticket(row_to_ticket(row))
     return 0
 
 
 def close_ticket(conn, raw_id):
-    try:
-        ticket_id = int(raw_id)
-    except (TypeError, ValueError):
-        ticket_id = None
-    if ticket_id is None or ticket_id <= 0:
-        print("工单编号必须为正整数", file=sys.stderr)
-        return 1
-
-    row = conn.execute(
-        "SELECT id, title, description, status FROM tickets WHERE id = ?",
-        (ticket_id,),
-    ).fetchone()
+    row = find_ticket(conn, raw_id)
     if row is None:
-        print("工单不存在", file=sys.stderr)
         return 1
 
-    conn.execute("UPDATE tickets SET status = ? WHERE id = ?", ("closed", ticket_id))
+    conn.execute("UPDATE tickets SET status = ? WHERE id = ?", ("closed", row[0]))
     conn.commit()
 
-    print_ticket(
-        {
-            "id": row[0],
-            "title": row[1],
-            "description": row[2],
-            "status": "closed",
-        }
-    )
+    ticket = row_to_ticket(row)
+    ticket["status"] = "closed"
+    print_ticket(ticket)
     return 0
 
 
