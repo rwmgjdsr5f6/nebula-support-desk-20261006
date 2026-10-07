@@ -9,6 +9,9 @@
     2. 打印异常 / 更换网络后无法打印（结案后为 closed）
     3. 导出失败 / 空字符串描述（open）
 
+三条件交集用例另用独立的四条工单固定样例（编号 1 至 4，描述均为空字符串），
+见 ThreeConditionListTestCase。
+
 运行方式（项目根目录）：
     python -m unittest discover -s tests
 """
@@ -755,6 +758,264 @@ class NoteKeywordListTestCase(unittest.TestCase):
             ("list", "--note-keyword", ""),
             ("list", "--note-keyword", "等待确认", "--status", "closed"),
             ("list", "--note-keyword", "等待确认", "--keyword", "登录问题"),
+        ):
+            self.run_cli(*argv)
+            self.assert_storage_unchanged()
+
+
+class ThreeConditionListTestCase(unittest.TestCase):
+    """有数据时 status、--keyword 与 --note-keyword 三条件取交集。
+
+    固定样例依次建立编号 1 至 4 的工单，描述均为空字符串：
+        1. 登录失败（open）；依次追加“等待确认”“再次等待确认”“已复现”三条备注
+        2. 打印异常（open）；备注为“等待确认”
+        3. 登录超时（结案后为 closed）；备注为“等待确认”
+        4. 登录受限（open）；没有备注
+
+    对该库执行 list --status open --keyword 登录 --note-keyword " 等待确认 "
+    只应得到编号 1：三条件任一被绕过都会多出其他工单。备注关键字先去除
+    首尾空白；编号 1 有两条备注命中也只返回一次。
+    """
+
+    TICKETS = [
+        {"title": "登录失败", "status": "open"},
+        {"title": "打印异常", "status": "open"},
+        {"title": "登录超时", "status": "closed"},
+        {"title": "登录受限", "status": "open"},
+    ]
+    NOTES = {
+        1: ["等待确认", "再次等待确认", "已复现"],
+        2: ["等待确认"],
+        3: ["等待确认"],
+    }
+    # 仅第三条工单结案
+    CLOSED_INDEX = 2
+
+    def setUp(self):
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmpdir.cleanup)
+        self.db_path = str(Path(self._tmpdir.name) / "test_tickets.sqlite")
+
+        for ticket in self.TICKETS:
+            created = self.run_cli(
+                "create", "--title", ticket["title"], "--description", ""
+            )
+            self.assertEqual(created.returncode, 0, f"准备样例失败: {created.stderr}")
+            self.assertEqual(created.stderr, "")
+        for ticket_id, texts in self.NOTES.items():
+            for text in texts:
+                noted = self.run_cli(
+                    "add-note", str(ticket_id), "--text", text
+                )
+                self.assertEqual(noted.returncode, 0, f"准备样例失败: {noted.stderr}")
+                self.assertEqual(noted.stderr, "")
+        self._close_ticket(self.CLOSED_INDEX + 1)
+
+        # 固定样例：编号按创建顺序恰为 1 至 4
+        self.expected_ticket_rows = [
+            [i + 1, ticket["title"], "", ticket["status"]]
+            for i, ticket in enumerate(self.TICKETS)
+        ]
+        self.expected_note_rows = [
+            [ticket_id, note_id, text]
+            for ticket_id, texts in self.NOTES.items()
+            for note_id, text in enumerate(texts, start=1)
+        ]
+        # 仅第三条工单的结案产生一条状态历史
+        self.expected_history_rows = [[3, 1, "open", "closed"]]
+        self.assert_storage_unchanged()
+
+    # ---------- 辅助方法 ----------
+
+    def run_cli(self, *args):
+        """以真实命令行入口运行 main.py，返回 CompletedProcess。"""
+        return subprocess.run(
+            [sys.executable, str(MAIN_PY), "--db", self.db_path, *args],
+            capture_output=True,
+            text=True,
+        )
+
+    def _close_ticket(self, ticket_id):
+        result = self.run_cli("close", str(ticket_id))
+        self.assertEqual(result.returncode, 0, f"准备样例失败: {result.stderr}")
+        self.assertEqual(result.stderr, "")
+
+    def list_tickets(self, *args):
+        """执行三条件 list 查询并将标准输出解析为唯一 JSON 数组。"""
+        result = self.run_cli("list", *args)
+        self.assertEqual(result.returncode, 0, f"list 失败: {result.stderr}")
+        self.assertEqual(result.stderr, "")
+        return ListCommandTestCase.parse_single_json_array(result.stdout)
+
+    def expected_ticket(self, index):
+        """按样例下标（0 起）构造期望工单；编号即下标加 1，描述为空字符串。"""
+        ticket = self.TICKETS[index]
+        return {
+            "id": index + 1,
+            "title": ticket["title"],
+            "description": "",
+            "status": ticket["status"],
+        }
+
+    def assertTicketShape(self, ticket):
+        """每项仅含 show 的四字段；id 为整数，其余为字符串，不含备注或摘要。"""
+        self.assertIsInstance(ticket, dict)
+        self.assertEqual(
+            set(ticket.keys()),
+            {"id", "title", "description", "status"},
+        )
+        # 明确要求 int 类型（bool 虽是 int 子类但不合法）
+        self.assertIs(type(ticket["id"]), int)
+        for key in ("title", "description", "status"):
+            self.assertIs(type(ticket[key]), str)
+
+    def assert_storage_unchanged(self):
+        """查询前后工单、备注与状态历史记录的数量和内容完全不变。"""
+        conn = sqlite3.connect(self.db_path)
+        try:
+            ticket_rows = conn.execute(
+                "SELECT id, title, description, status FROM tickets ORDER BY id"
+            ).fetchall()
+            note_rows = conn.execute(
+                "SELECT ticket_id, note_id, text FROM ticket_notes "
+                "ORDER BY ticket_id, note_id"
+            ).fetchall()
+            history_rows = conn.execute(
+                "SELECT ticket_id, event_id, from_status, to_status "
+                "FROM ticket_history ORDER BY ticket_id, event_id"
+            ).fetchall()
+        finally:
+            conn.close()
+        self.assertEqual([list(row) for row in ticket_rows], self.expected_ticket_rows)
+        self.assertEqual([list(row) for row in note_rows], self.expected_note_rows)
+        self.assertEqual(
+            [list(row) for row in history_rows], self.expected_history_rows
+        )
+
+    # ---------- 三条件交集：每个条件都不能被绕过 ----------
+
+    THREE_CONDITION = (
+        "--status", "open",
+        "--keyword", "登录",
+        "--note-keyword", " 等待确认 ",
+    )
+
+    def test_three_conditions_intersect_to_ticket_1(self):
+        tickets = self.list_tickets(*self.THREE_CONDITION)
+
+        # 只得到编号 1 的工单，标题与空描述保留原值
+        self.assertEqual(tickets, [self.expected_ticket(0)])
+        self.assertEqual(tickets[0]["title"], "登录失败")
+        self.assertEqual(tickets[0]["description"], "")
+        for ticket in tickets:
+            self.assertTicketShape(ticket)
+
+        # 固定样例反证各条件均生效（期望直接由样例给出，不经产品筛选函数）：
+        # 去掉状态条件会多出 closed 的编号 3
+        self.assertEqual(
+            [t["id"] for t in self.list_tickets(
+                "--keyword", "登录", "--note-keyword", " 等待确认 ")],
+            [1, 3],
+        )
+        # 去掉标题描述关键字会多出标题不含“登录”的编号 2
+        self.assertEqual(
+            [t["id"] for t in self.list_tickets(
+                "--status", "open", "--note-keyword", " 等待确认 ")],
+            [1, 2],
+        )
+        # 去掉备注关键字会多出没有备注的编号 4
+        self.assertEqual(
+            [t["id"] for t in self.list_tickets(
+                "--status", "open", "--keyword", "登录")],
+            [1, 4],
+        )
+        self.assert_storage_unchanged()
+
+    def test_changing_only_status_to_closed_returns_ticket_3(self):
+        tickets = self.list_tickets(
+            "--status", "closed",
+            "--keyword", "登录",
+            "--note-keyword", " 等待确认 ",
+        )
+        # 只把状态条件改为 closed：仅编号 3 同时满足其余两个条件
+        self.assertEqual(tickets, [self.expected_ticket(2)])
+        self.assertEqual(tickets[0]["title"], "登录超时")
+        self.assertEqual(tickets[0]["description"], "")
+        for ticket in tickets:
+            self.assertTicketShape(ticket)
+        self.assert_storage_unchanged()
+
+    def test_unknown_note_keyword_returns_empty_array(self):
+        result = self.run_cli(
+            "list",
+            "--status", "open",
+            "--keyword", "登录",
+            "--note-keyword", "不存在的文字",
+        )
+        # 正常无匹配查询：退出码 0、标准错误为空、标准输出只有空数组
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stderr, "")
+        self.assertEqual(
+            ListCommandTestCase.parse_single_json_array(result.stdout), []
+        )
+        self.assert_storage_unchanged()
+
+    # ---------- 三条件查询中的空备注关键字：退出码 1 ----------
+
+    def test_empty_or_blank_note_keyword_in_three_condition_query_exits_1(self):
+        for note_keyword in ("", "   ", "\t \n"):
+            with self.subTest(note_keyword=note_keyword):
+                result = self.run_cli(
+                    "list",
+                    "--status", "open",
+                    "--keyword", "登录",
+                    "--note-keyword", note_keyword,
+                )
+                self.assertEqual(result.returncode, 1)
+                self.assertEqual(result.stdout, "")
+                self.assertEqual(result.stderr, "关键字不能为空\n")
+                self.assert_storage_unchanged()
+
+    # ---------- --note-keyword 缺少取值：用法错误，退出码 2 ----------
+
+    def test_note_keyword_missing_value_in_three_condition_query_exits_2(self):
+        result = self.run_cli(
+            "list",
+            "--status", "open",
+            "--keyword", "登录",
+            "--note-keyword",
+        )
+        self.assertEqual(result.returncode, 2)
+        self.assertEqual(result.stdout, "")
+        self.assertIn("usage", result.stderr.lower())
+        self.assert_storage_unchanged()
+
+    # ---------- 只读与可重复性 ----------
+
+    def test_three_condition_queries_are_read_only_and_repeatable(self):
+        first = self.list_tickets(*self.THREE_CONDITION)
+        self.assertEqual(first, [self.expected_ticket(0)])
+
+        # 同库重复查询得到相同数据
+        self.assertEqual(self.list_tickets(*self.THREE_CONDITION), first)
+        closed_query = (
+            "--status", "closed",
+            "--keyword", "登录",
+            "--note-keyword", " 等待确认 ",
+        )
+        self.assertEqual(
+            self.list_tickets(*closed_query), [self.expected_ticket(2)]
+        )
+        self.assertEqual(self.list_tickets(*closed_query), [self.expected_ticket(2)])
+
+        # 正常、无匹配与失败查询前后，工单、备注与状态历史均不变
+        for argv in (
+            ("list", *self.THREE_CONDITION),
+            ("list", *closed_query),
+            ("list", "--status", "open", "--keyword", "登录",
+             "--note-keyword", "不存在的文字"),
+            ("list", "--status", "open", "--keyword", "登录",
+             "--note-keyword", ""),
         ):
             self.run_cli(*argv)
             self.assert_storage_unchanged()
