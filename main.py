@@ -316,7 +316,27 @@ def summary_ticket(conn, raw_id):
     return 0
 
 
-def list_tickets(conn, status, keyword, note_keyword=None):
+def parse_limit(raw_value):
+    """argparse 类型函数：按 Python int() 规则解析 --limit 的数量。
+
+    允许正号、前导零与首尾空白；解析结果必须为正整数。
+    零、负数、小数、不能解析的文本或空字符串都抛出
+    ArgumentTypeError，由 argparse 转为退出码 2 的用法错误。
+    """
+    try:
+        limit = int(raw_value)
+    except (TypeError, ValueError):
+        raise argparse.ArgumentTypeError(
+            f"--limit 的数量必须为正整数: {raw_value!r}"
+        )
+    if limit <= 0:
+        raise argparse.ArgumentTypeError(
+            f"--limit 的数量必须为正整数: {raw_value!r}"
+        )
+    return limit
+
+
+def list_tickets(conn, status, keyword, note_keyword=None, limit=None):
     # 关键字先去除首尾空白；显式传入空字符串或去除后为空时，
     # 按使用错误处理（退出码 1），不进入查询
     if keyword is not None:
@@ -355,6 +375,11 @@ def list_tickets(conn, status, keyword, note_keyword=None):
     query += " ORDER BY id"
 
     rows = conn.execute(query, params).fetchall()
+    if limit is not None:
+        # 在 Python 侧截取前 limit 条：数量可能超过 SQLite 有符号整数
+        # 上限，绑定进 SQL 的 LIMIT 会溢出，而切片对任意大的整数都安全；
+        # 数量超过匹配数时自然返回全部匹配项，不补齐空位
+        rows = rows[:limit]
 
     tickets = [
         {
@@ -437,6 +462,14 @@ def build_parser():
         help="按内部备注正文中的连续关键字筛选：任意一条备注命中即入选"
         "（区分大小写的字面子串匹配）；与 --status、--keyword 取交集",
     )
+    list_parser.add_argument(
+        "--limit",
+        type=parse_limit,
+        default=None,
+        metavar="数量",
+        help="只返回编号最小的前若干张匹配工单（正整数；"
+        "不传则返回全部匹配工单）",
+    )
 
     return parser
 
@@ -465,7 +498,7 @@ def main(argv=None):
             return summary_ticket(conn, args.id)
         if args.command == "list":
             return list_tickets(
-                conn, args.status, args.keyword, args.note_keyword
+                conn, args.status, args.keyword, args.note_keyword, args.limit
             )
         return 1
     finally:

@@ -123,7 +123,7 @@ python main.py --db demo.sqlite notes 1 --keyword "等待"
 ### 列出工单
 
 ```bash
-python main.py --db demo.sqlite list [--status open|closed] [--keyword 关键字] [--note-keyword 备注关键字]
+python main.py --db demo.sqlite list [--status open|closed] [--keyword 关键字] [--note-keyword 备注关键字] [--limit 数量]
 ```
 
 - 不带任何参数时返回库中全部工单，按编号（整数）升序排列。
@@ -133,6 +133,7 @@ python main.py --db demo.sqlite list [--status open|closed] [--keyword 关键字
   - `--keyword` 只搜索标题与问题描述，不搜索内部备注。
 - `--note-keyword`：可选的备注关键字查询。关键字同样先去除首尾空白，再对每条内部备注正文做**区分大小写的连续字面子串匹配**（特殊字符规则与 `--keyword` 一致）；工单只要有任意一条备注命中即入选，较早的备注也参与匹配，多条备注同时命中仍只返回一次，没有备注的工单不入选。
   - `--note-keyword` 与 `--status`、`--keyword` 同时给出时取交集：备注命中、标题/描述命中与状态条件必须同时满足。
+- `--limit`：可选的返回数量上限。数量按 Python `int()` 规则解析（允许正号、前导零与首尾空白），解析结果为正整数即有效；先按上述条件取交集并按编号升序排列，再只返回前指定数量的工单。数量超过匹配工单数（包括超过 SQLite 有符号整数上限的写法）时返回全部匹配项，不补齐空位；不传 `--limit` 时返回全部匹配工单。
 - 成功时退出码为 0，标准错误为空，标准输出只有一个 JSON 数组，每项的字段与类型和查看工单一致，按编号升序排列，不附加备注内容、匹配标记或摘要；没有匹配项、库中没有工单或条件排除了全部命中时，输出 `[]`。
 - 查询为只读操作，不修改已有工单、备注与状态历史，不新增占位记录；默认数据库位置与 `--db` 选择规则不变，已有数据库无需重建即可查询。
 
@@ -141,6 +142,7 @@ python main.py --db demo.sqlite list --keyword " 登录 "
 python main.py --db demo.sqlite list --keyword 登录 --status closed
 python main.py --db demo.sqlite list --note-keyword " 等待确认 "
 python main.py --db demo.sqlite list --note-keyword 等待确认 --status closed
+python main.py --db demo.sqlite list --status open --keyword 登录 --note-keyword 等待确认 --limit 1
 ```
 
 ## 错误结果
@@ -165,6 +167,6 @@ python main.py --db demo.sqlite list --note-keyword 等待确认 --status closed
 | `list --keyword` 显式传入空字符串或去除首尾空白后为空 | `关键字不能为空` |
 | `list --note-keyword` 显式传入空字符串或去除首尾空白后为空 | `关键字不能为空` |
 
-空白标题被拒绝、编号校验失败、关键字为空、备注内容为空或工单不存在时，均不会改变库中已有工单与备注的数据（不存在的数据库按既有规则自动创建，但不会生成占位工单或备注）。`close` 缺少编号或带有未识别参数时，退出码为 2，标准输出为空，标准错误给出用法提示。`add-note` 缺少编号、缺少 `--text` 或其值、带有未识别参数，以及 `notes`、`history` 缺少编号或带有未识别参数时，同样退出码为 2、标准输出为空、标准错误给出用法提示；`notes --keyword` 缺少参数值时亦然。`list` 中 `--keyword` 或 `--note-keyword` 缺少参数值、`--status` 取值不是 `open`/`closed` 或出现未知选项时，同样退出码为 2、标准输出为空、标准错误给出用法提示。
+空白标题被拒绝、编号校验失败、关键字为空、备注内容为空或工单不存在时，均不会改变库中已有工单与备注的数据（不存在的数据库按既有规则自动创建，但不会生成占位工单或备注）。`close` 缺少编号或带有未识别参数时，退出码为 2，标准输出为空，标准错误给出用法提示。`add-note` 缺少编号、缺少 `--text` 或其值、带有未识别参数，以及 `notes`、`history` 缺少编号或带有未识别参数时，同样退出码为 2、标准输出为空、标准错误给出用法提示；`notes --keyword` 缺少参数值时亦然。`list` 中 `--keyword` 或 `--note-keyword` 缺少参数值、`--status` 取值不是 `open`/`closed`、`--limit` 缺少参数值或数量不是正整数（零、负数、小数、不能解析的文本或显式空字符串），或出现未知选项时，同样退出码为 2、标准输出为空、标准错误给出用法提示；`--limit` 数量无效时优先于关键字为空返回该用法错误。
 
 编号按 Python `int()` 规则解析（允许正号、前导零与首尾空白）。对于能解析为正整数、但大于 SQLite 可保存的最大整数 9223372036854775807 的编号（如 `9223372036854775808`，带正号、前导零或空白的写法同理），`show`、`close`、`reopen`、`history` 一律按工单不存在处理：退出码 1，标准输出为空，标准错误仅输出 `工单不存在` 及换行，不创建占位工单、不改动已有工单与历史。最大整数本身是合法编号，库中无对应记录时同样返回 `工单不存在`。
