@@ -350,11 +350,13 @@ def clear_draft(conn, raw_id):
     return 0
 
 
-def summary_ticket(conn, raw_id):
+def summary_ticket(conn, raw_id, include_draft=False):
     """一次查询输出工单当前状态与已有处理记录的摘要；只读操作。
 
     摘要仅汇总本地记录：备注总数、最新备注（note_id 最大）与状态变更
-    总数，不分析备注语义，也不推断问题是否解决。
+    总数，不分析备注语义，也不推断问题是否解决。传入 include_draft 时
+    额外附带 draft 字段，结构与 draft 命令一致；工单存在但没有草稿时
+    text 为 null。
     """
     row = find_ticket(conn, raw_id)
     if row is None:
@@ -380,17 +382,21 @@ def summary_ticket(conn, raw_id):
         (ticket_id,),
     ).fetchone()[0]
 
-    print(
-        json.dumps(
-            {
-                "ticket": row_to_ticket(row),
-                "note_count": note_count,
-                "latest_note": latest_note,
-                "status_change_count": status_change_count,
-            },
-            ensure_ascii=False,
-        )
-    )
+    summary = {
+        "ticket": row_to_ticket(row),
+        "note_count": note_count,
+        "latest_note": latest_note,
+        "status_change_count": status_change_count,
+    }
+    if include_draft:
+        draft_row = conn.execute(
+            "SELECT text FROM ticket_drafts WHERE ticket_id = ?",
+            (ticket_id,),
+        ).fetchone()
+        draft_text = None if draft_row is None else draft_row[0]
+        summary["draft"] = draft_to_dict(ticket_id, draft_text)
+
+    print(json.dumps(summary, ensure_ascii=False))
     return 0
 
 
@@ -564,6 +570,11 @@ def build_parser():
         "summary", help="按编号读取工单处理摘要"
     )
     summary_parser.add_argument("id", help="工单编号（正整数）")
+    summary_parser.add_argument(
+        "--include-draft",
+        action="store_true",
+        help="同时输出当前回复草稿（结构与 draft 命令一致；无草稿时 text 为 null）",
+    )
 
     list_parser = subparsers.add_parser("list", help="列出工单")
     list_parser.add_argument(
@@ -630,7 +641,7 @@ def main(argv=None):
         if args.command == "clear-draft":
             return clear_draft(conn, args.id)
         if args.command == "summary":
-            return summary_ticket(conn, args.id)
+            return summary_ticket(conn, args.id, args.include_draft)
         if args.command == "list":
             return list_tickets(
                 conn,
