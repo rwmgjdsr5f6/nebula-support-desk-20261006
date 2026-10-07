@@ -1,6 +1,6 @@
 """本地客服工单中心命令行入口。
 
-支持工单的创建、查看、结案、重开、内部备注与列表筛选，数据存储于本地 SQLite 文件。
+支持工单的创建、查看、结案、重开、内部备注、回复草稿与列表筛选，数据存储于本地 SQLite 文件。
 """
 
 import argparse
@@ -51,6 +51,18 @@ def connect(db_path):
             from_status TEXT NOT NULL,
             to_status TEXT NOT NULL,
             UNIQUE (ticket_id, event_id)
+        )
+        """
+    )
+    # 每张工单至多一份回复草稿：UNIQUE(ticket_id) 兜底，
+    # 保存时整篇覆盖，不保留历史版本
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS ticket_drafts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ticket_id INTEGER NOT NULL,
+            text TEXT NOT NULL,
+            UNIQUE (ticket_id)
         )
         """
     )
@@ -272,6 +284,50 @@ def list_history(conn, raw_id):
     return 0
 
 
+def draft_to_dict(ticket_id, text):
+    """构造对外输出的草稿字典：仅含 ticket_id、text。"""
+    return {"ticket_id": ticket_id, "text": text}
+
+
+def set_draft(conn, raw_id, text):
+    """确认工单存在后保存回复草稿：整篇覆盖该工单此前的草稿，不保留版本。"""
+    row = find_ticket(conn, raw_id)
+    if row is None:
+        return 1
+
+    # 工单存在后才校验内容：空字符串或去除首尾空白后为空一律拒绝，原草稿不变
+    if text is None or not text.strip():
+        print("草稿不能为空", file=sys.stderr)
+        return 1
+
+    ticket_id = row[0]
+    conn.execute(
+        "INSERT OR REPLACE INTO ticket_drafts (ticket_id, text) VALUES (?, ?)",
+        (ticket_id, text),
+    )
+    conn.commit()
+
+    print(json.dumps(draft_to_dict(ticket_id, text), ensure_ascii=False))
+    return 0
+
+
+def get_draft(conn, raw_id):
+    """读取工单当前的回复草稿；工单存在但没有草稿时 text 为 null。只读操作。"""
+    row = find_ticket(conn, raw_id)
+    if row is None:
+        return 1
+
+    ticket_id = row[0]
+    draft_row = conn.execute(
+        "SELECT text FROM ticket_drafts WHERE ticket_id = ?",
+        (ticket_id,),
+    ).fetchone()
+    text = None if draft_row is None else draft_row[0]
+
+    print(json.dumps(draft_to_dict(ticket_id, text), ensure_ascii=False))
+    return 0
+
+
 def summary_ticket(conn, raw_id):
     """一次查询输出工单当前状态与已有处理记录的摘要；只读操作。
 
@@ -464,6 +520,19 @@ def build_parser():
     )
     history_parser.add_argument("id", help="工单编号（正整数）")
 
+    set_draft_parser = subparsers.add_parser(
+        "set-draft", help="保存工单的回复草稿（整篇覆盖，不保留版本）"
+    )
+    set_draft_parser.add_argument("id", help="工单编号（正整数）")
+    set_draft_parser.add_argument(
+        "--text",
+        required=True,
+        help="草稿正文（按原文保存；空字符串或去除首尾空白后为空时拒绝）",
+    )
+
+    draft_parser = subparsers.add_parser("draft", help="按编号读取工单的回复草稿")
+    draft_parser.add_argument("id", help="工单编号（正整数）")
+
     summary_parser = subparsers.add_parser(
         "summary", help="按编号读取工单处理摘要"
     )
@@ -527,6 +596,10 @@ def main(argv=None):
             return list_notes(conn, args.id, args.keyword)
         if args.command == "history":
             return list_history(conn, args.id)
+        if args.command == "set-draft":
+            return set_draft(conn, args.id, args.text)
+        if args.command == "draft":
+            return get_draft(conn, args.id)
         if args.command == "summary":
             return summary_ticket(conn, args.id)
         if args.command == "list":
