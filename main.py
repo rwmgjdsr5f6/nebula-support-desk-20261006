@@ -40,6 +40,20 @@ def connect(db_path):
         )
         """
     )
+    # 状态变更历史同样按工单独立编号：仅记录实际发生的状态切换，
+    # 创建产生的初始 open 与重复结案/重开均不写入
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS ticket_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ticket_id INTEGER NOT NULL,
+            event_id INTEGER NOT NULL,
+            from_status TEXT NOT NULL,
+            to_status TEXT NOT NULL,
+            UNIQUE (ticket_id, event_id)
+        )
+        """
+    )
     conn.commit()
     return conn
 
@@ -116,13 +130,35 @@ def show_ticket(conn, raw_id):
 
 
 def set_ticket_status(conn, raw_id, status):
-    """查找工单并将其状态更新为 status，输出更新后的工单。"""
+    """查找工单并将其状态更新为 status，输出更新后的工单。
+
+    仅当状态实际变化（open ↔ closed）时才写库并追加一条历史；
+    重复结案或重复重开仍成功返回当前工单，但不占用历史序号。
+    """
     row = find_ticket(conn, raw_id)
     if row is None:
         return 1
 
-    conn.execute("UPDATE tickets SET status = ? WHERE id = ?", (status, row[0]))
-    conn.commit()
+    ticket_id = row[0]
+    current_status = row[3]
+    if current_status != status:
+        conn.execute(
+            "UPDATE tickets SET status = ? WHERE id = ?", (status, ticket_id)
+        )
+        row_max = conn.execute(
+            "SELECT MAX(event_id) FROM ticket_history WHERE ticket_id = ?",
+            (ticket_id,),
+        ).fetchone()
+        next_event_id = (row_max[0] or 0) + 1
+        conn.execute(
+            """
+            INSERT INTO ticket_history
+                (ticket_id, event_id, from_status, to_status)
+            VALUES (?, ?, ?, ?)
+            """,
+            (ticket_id, next_event_id, current_status, status),
+        )
+        conn.commit()
 
     ticket = row_to_ticket(row)
     ticket["status"] = status
@@ -183,6 +219,40 @@ def list_notes(conn, raw_id):
     ).fetchall()
     notes = [note_to_dict(ticket_id, note_row[0], note_row[1]) for note_row in rows]
     print(json.dumps(notes, ensure_ascii=False))
+    return 0
+
+
+def history_event_to_dict(ticket_id, event_id, from_status, to_status):
+    """构造对外输出的历史事件字典：仅含 event_id、ticket_id、from_status、to_status。"""
+    return {
+        "event_id": event_id,
+        "ticket_id": ticket_id,
+        "from_status": from_status,
+        "to_status": to_status,
+    }
+
+
+def list_history(conn, raw_id):
+    """按 event_id 升序输出工单的状态变更历史；无历史时输出 []。只读操作。"""
+    row = find_ticket(conn, raw_id)
+    if row is None:
+        return 1
+
+    ticket_id = row[0]
+    rows = conn.execute(
+        """
+        SELECT event_id, from_status, to_status
+        FROM ticket_history
+        WHERE ticket_id = ?
+        ORDER BY event_id
+        """,
+        (ticket_id,),
+    ).fetchall()
+    events = [
+        history_event_to_dict(ticket_id, event_row[0], event_row[1], event_row[2])
+        for event_row in rows
+    ]
+    print(json.dumps(events, ensure_ascii=False))
     return 0
 
 
@@ -260,6 +330,11 @@ def build_parser():
     notes_parser = subparsers.add_parser("notes", help="按编号列出工单的内部备注")
     notes_parser.add_argument("id", help="工单编号（正整数）")
 
+    history_parser = subparsers.add_parser(
+        "history", help="按编号列出工单的状态变更历史"
+    )
+    history_parser.add_argument("id", help="工单编号（正整数）")
+
     list_parser = subparsers.add_parser("list", help="列出工单")
     list_parser.add_argument(
         "--status",
@@ -294,6 +369,8 @@ def main(argv=None):
             return add_note(conn, args.id, args.text)
         if args.command == "notes":
             return list_notes(conn, args.id)
+        if args.command == "history":
+            return list_history(conn, args.id)
         if args.command == "list":
             return list_tickets(conn, args.status, args.keyword)
         return 1
