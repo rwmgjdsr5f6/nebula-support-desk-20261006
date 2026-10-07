@@ -206,18 +206,34 @@ def add_note(conn, raw_id, text):
     return 0
 
 
-def list_notes(conn, raw_id):
-    """按 note_id 升序输出工单的全部备注；无备注时输出 []。"""
+def list_notes(conn, raw_id, keyword=None):
+    """按 note_id 升序输出工单的备注；无备注或无命中时输出 []。
+
+    不传 keyword 时返回全部备注；传入时先去除关键字首尾空白，再对备注
+    正文做区分大小写的连续字面子串匹配（内部空白、%、_、引号与反斜杠
+    均按原字符比较）。仅查询当前工单，其他工单的备注不参与。
+    """
     row = find_ticket(conn, raw_id)
     if row is None:
         return 1
+
+    # 工单存在后才校验关键字：显式空字符串或纯空白一律拒绝
+    if keyword is not None:
+        keyword = keyword.strip()
+        if not keyword:
+            print("关键字不能为空", file=sys.stderr)
+            return 1
 
     ticket_id = row[0]
     rows = conn.execute(
         "SELECT note_id, text FROM ticket_notes WHERE ticket_id = ? ORDER BY note_id",
         (ticket_id,),
     ).fetchall()
-    notes = [note_to_dict(ticket_id, note_row[0], note_row[1]) for note_row in rows]
+    notes = [
+        note_to_dict(ticket_id, note_row[0], note_row[1])
+        for note_row in rows
+        if keyword is None or keyword in note_row[1]
+    ]
     print(json.dumps(notes, ensure_ascii=False))
     return 0
 
@@ -373,6 +389,11 @@ def build_parser():
 
     notes_parser = subparsers.add_parser("notes", help="按编号列出工单的内部备注")
     notes_parser.add_argument("id", help="工单编号（正整数）")
+    notes_parser.add_argument(
+        "--keyword",
+        default=None,
+        help="只返回正文包含该关键字的备注（区分大小写的字面子串匹配）；不传则返回全部",
+    )
 
     history_parser = subparsers.add_parser(
         "history", help="按编号列出工单的状态变更历史"
@@ -417,7 +438,7 @@ def main(argv=None):
         if args.command == "add-note":
             return add_note(conn, args.id, args.text)
         if args.command == "notes":
-            return list_notes(conn, args.id)
+            return list_notes(conn, args.id, args.keyword)
         if args.command == "history":
             return list_history(conn, args.id)
         if args.command == "summary":
