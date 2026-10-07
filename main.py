@@ -316,7 +316,7 @@ def summary_ticket(conn, raw_id):
     return 0
 
 
-def list_tickets(conn, status, keyword, note_keyword=None, limit=None):
+def list_tickets(conn, status, keyword, note_keyword=None, limit=None, after_id=None):
     # 关键字先去除首尾空白；显式传入空字符串或去除后为空时，
     # 按使用错误处理（退出码 1），不进入查询
     if keyword is not None:
@@ -330,9 +330,20 @@ def list_tickets(conn, status, keyword, note_keyword=None, limit=None):
             print("关键字不能为空", file=sys.stderr)
             return 1
 
+    if after_id is not None and after_id > SQLITE_MAX_INT:
+        # 游标超过 SQLite 可保存的最大整数时，不可能存在编号更大的工单，
+        # 直接返回空数组，避免绑定参数触发 OverflowError
+        print("[]")
+        return 0
+
     query = "SELECT id, title, description, status FROM tickets"
     conditions = []
     params = []
+    if after_id:
+        # 游标只是编号边界：只保留 id 严格大于它的工单，不要求该编号
+        # 对应工单存在；0 与未设置等价（编号均不小于 1），不加条件
+        conditions.append("id > ?")
+        params.append(after_id)
     if status is not None:
         conditions.append("status = ?")
         params.append(status)
@@ -388,6 +399,23 @@ def positive_limit(raw):
         raise argparse.ArgumentTypeError("必须为正整数")
     if value <= 0:
         raise argparse.ArgumentTypeError("必须为正整数")
+    return value
+
+
+def non_negative_after_id(raw):
+    """解析 list --after-id 的游标：按 Python int() 规则，非负整数有效。
+
+    允许正号、前导零与首尾空白（与 int() 自身规则一致）；0 等价于
+    未设置边界。负数、小数、无法解析的文本、空字符串或纯空白均抛错，
+    由 argparse 按用法错误处理（退出码 2）。返回 Python 任意精度 int，
+    超过 SQLite 有符号整数上限的游标在查询侧按空结果处理。
+    """
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        raise argparse.ArgumentTypeError("必须为非负整数")
+    if value < 0:
+        raise argparse.ArgumentTypeError("必须为非负整数")
     return value
 
 
@@ -466,6 +494,14 @@ def build_parser():
         help="只返回匹配工单中编号最小的前若干张（正整数，允许正号、"
         "前导零与首尾空白）；不传则返回全部匹配工单",
     )
+    list_parser.add_argument(
+        "--after-id",
+        default=None,
+        type=non_negative_after_id,
+        help="只返回编号严格大于该游标的工单（非负整数，允许正号、前导零"
+        "与首尾空白；0 等价于不设置边界）；与 --status、--keyword、"
+        "--note-keyword 取交集后按编号升序再应用 --limit",
+    )
 
     return parser
 
@@ -494,7 +530,8 @@ def main(argv=None):
             return summary_ticket(conn, args.id)
         if args.command == "list":
             return list_tickets(
-                conn, args.status, args.keyword, args.note_keyword, args.limit
+                conn, args.status, args.keyword, args.note_keyword, args.limit,
+                args.after_id,
             )
         return 1
     finally:
