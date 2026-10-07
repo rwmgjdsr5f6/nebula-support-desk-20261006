@@ -256,6 +256,50 @@ def list_history(conn, raw_id):
     return 0
 
 
+def summary_ticket(conn, raw_id):
+    """一次查询输出工单当前状态与已有处理记录的摘要；只读操作。
+
+    摘要仅汇总本地记录：备注总数、最新备注（note_id 最大）与状态变更
+    总数，不分析备注语义，也不推断问题是否解决。
+    """
+    row = find_ticket(conn, raw_id)
+    if row is None:
+        return 1
+
+    ticket_id = row[0]
+    note_count = conn.execute(
+        "SELECT COUNT(*) FROM ticket_notes WHERE ticket_id = ?",
+        (ticket_id,),
+    ).fetchone()[0]
+    latest_row = conn.execute(
+        "SELECT note_id, text FROM ticket_notes WHERE ticket_id = ? "
+        "ORDER BY note_id DESC LIMIT 1",
+        (ticket_id,),
+    ).fetchone()
+    latest_note = (
+        None
+        if latest_row is None
+        else note_to_dict(ticket_id, latest_row[0], latest_row[1])
+    )
+    status_change_count = conn.execute(
+        "SELECT COUNT(*) FROM ticket_history WHERE ticket_id = ?",
+        (ticket_id,),
+    ).fetchone()[0]
+
+    print(
+        json.dumps(
+            {
+                "ticket": row_to_ticket(row),
+                "note_count": note_count,
+                "latest_note": latest_note,
+                "status_change_count": status_change_count,
+            },
+            ensure_ascii=False,
+        )
+    )
+    return 0
+
+
 def list_tickets(conn, status, keyword):
     # 关键字先去除首尾空白；显式传入空字符串或去除后为空时，
     # 按使用错误处理（退出码 1），不进入查询
@@ -335,6 +379,11 @@ def build_parser():
     )
     history_parser.add_argument("id", help="工单编号（正整数）")
 
+    summary_parser = subparsers.add_parser(
+        "summary", help="按编号读取工单处理摘要"
+    )
+    summary_parser.add_argument("id", help="工单编号（正整数）")
+
     list_parser = subparsers.add_parser("list", help="列出工单")
     list_parser.add_argument(
         "--status",
@@ -371,6 +420,8 @@ def main(argv=None):
             return list_notes(conn, args.id)
         if args.command == "history":
             return list_history(conn, args.id)
+        if args.command == "summary":
+            return summary_ticket(conn, args.id)
         if args.command == "list":
             return list_tickets(conn, args.status, args.keyword)
         return 1
