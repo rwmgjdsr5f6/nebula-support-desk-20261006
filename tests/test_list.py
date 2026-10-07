@@ -485,6 +485,281 @@ class KeywordListTestCase(unittest.TestCase):
             self.assert_storage_unchanged()
 
 
+class NoteKeywordListTestCase(unittest.TestCase):
+    """list --note-keyword 备注正文查询。
+
+    固定样例即需求中的两条合成工单（标题均为“登录问题”）：
+        1. open，两条备注均含“等待确认”
+        2. closed，备注仅含“已解决”
+    """
+
+    TICKETS = [
+        {"title": "登录问题", "description": "第一张", "status": "open"},
+        {"title": "登录问题", "description": "第二张", "status": "closed"},
+    ]
+    NOTES = {
+        1: ["已联系用户，等待确认", "再次等待确认结果"],
+        2: ["已解决"],
+    }
+
+    def setUp(self):
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmpdir.cleanup)
+        self.db_path = str(Path(self._tmpdir.name) / "test_tickets.sqlite")
+
+        self.ticket_ids = []
+        for ticket in self.TICKETS:
+            result = self.run_cli(
+                "create",
+                "--title",
+                ticket["title"],
+                "--description",
+                ticket["description"],
+            )
+            self.assertEqual(result.returncode, 0, f"准备样例失败: {result.stderr}")
+            self.assertEqual(result.stderr, "")
+            self.ticket_ids.append(json.loads(result.stdout)["id"])
+        # 按工单编号追加备注
+        for ticket_id, texts in self.NOTES.items():
+            for text in texts:
+                noted = self.run_cli(
+                    "add-note", str(ticket_id), "--text", text
+                )
+                self.assertEqual(noted.returncode, 0, f"准备样例失败: {noted.stderr}")
+                self.assertEqual(noted.stderr, "")
+        # 第二条工单结案
+        closed = self.run_cli("close", str(self.ticket_ids[1]))
+        self.assertEqual(closed.returncode, 0, f"准备样例失败: {closed.stderr}")
+        self.assertEqual(self.ticket_ids, [1, 2])
+
+    def run_cli(self, *args):
+        return subprocess.run(
+            [sys.executable, str(MAIN_PY), "--db", self.db_path, *args],
+            capture_output=True,
+            text=True,
+        )
+
+    def list_tickets(self, *args):
+        """执行 list 命令并将标准输出解析为唯一 JSON 数组。"""
+        result = self.run_cli("list", *args)
+        self.assertEqual(result.returncode, 0, f"list 失败: {result.stderr}")
+        self.assertEqual(result.stderr, "")
+        return ListCommandTestCase.parse_single_json_array(result.stdout)
+
+    def expected_tickets(self, indexes):
+        return [
+            {
+                "id": self.ticket_ids[i],
+                "title": self.TICKETS[i]["title"],
+                "description": self.TICKETS[i]["description"],
+                "status": self.TICKETS[i]["status"],
+            }
+            for i in indexes
+        ]
+
+    def assert_storage_unchanged(self):
+        """工单、备注与状态历史均不被查询改动。"""
+        conn = sqlite3.connect(self.db_path)
+        try:
+            ticket_rows = conn.execute(
+                "SELECT id, title, description, status FROM tickets ORDER BY id"
+            ).fetchall()
+            note_rows = conn.execute(
+                "SELECT ticket_id, note_id, text FROM ticket_notes "
+                "ORDER BY ticket_id, note_id"
+            ).fetchall()
+            history_rows = conn.execute(
+                "SELECT ticket_id, event_id, from_status, to_status "
+                "FROM ticket_history ORDER BY ticket_id, event_id"
+            ).fetchall()
+        finally:
+            conn.close()
+        self.assertEqual(
+            [list(row) for row in ticket_rows],
+            [
+                [t["id"], t["title"], t["description"], t["status"]]
+                for t in self.expected_tickets([0, 1])
+            ],
+        )
+        self.assertEqual(
+            [list(row) for row in note_rows],
+            [[1, 1, "已联系用户，等待确认"], [1, 2, "再次等待确认结果"], [2, 1, "已解决"]],
+        )
+        self.assertEqual([list(row) for row in history_rows], [[2, 1, "open", "closed"]])
+
+    # ---------- 基本命中与去重 ----------
+
+    def test_note_keyword_matches_any_note_once(self):
+        # 需求验收：两条备注都命中也只返回第一张一次
+        tickets = self.list_tickets("--note-keyword", " 等待确认 ")
+        self.assertEqual(tickets, self.expected_tickets([0]))
+
+    def test_note_keyword_earlier_note_participates(self):
+        # 只有较早的第一条备注命中
+        self.assertEqual(
+            self.list_tickets("--note-keyword", "已联系用户"),
+            self.expected_tickets([0]),
+        )
+
+    def test_note_keyword_hit_in_closed_ticket(self):
+        self.assertEqual(
+            self.list_tickets("--note-keyword", "已解决"),
+            self.expected_tickets([1]),
+        )
+
+    def test_note_keyword_output_shape_has_no_note_fields(self):
+        tickets = self.list_tickets("--note-keyword", "等待确认")
+        self.assertEqual(len(tickets), 1)
+        self.assertEqual(
+            set(tickets[0].keys()), {"id", "title", "description", "status"}
+        )
+
+    # ---------- 与其他条件取交集 ----------
+
+    def test_note_keyword_and_status_are_intersected(self):
+        # 需求验收：命中的第一张是 open，closed 交集为空
+        self.assertEqual(
+            self.list_tickets("--note-keyword", "等待确认", "--status", "closed"),
+            [],
+        )
+        self.assertEqual(
+            self.list_tickets("--note-keyword", "等待确认", "--status", "open"),
+            self.expected_tickets([0]),
+        )
+        self.assertEqual(
+            self.list_tickets("--note-keyword", "已解决", "--status", "closed"),
+            self.expected_tickets([1]),
+        )
+
+    def test_note_keyword_and_keyword_are_intersected(self):
+        # 两条工单标题都含“登录问题”，备注条件只留下第一张
+        self.assertEqual(
+            self.list_tickets(
+                "--keyword", "登录问题", "--note-keyword", "等待确认"
+            ),
+            self.expected_tickets([0]),
+        )
+        # --keyword 只搜索标题/描述：“已解决”只在备注中，故无命中
+        self.assertEqual(self.list_tickets("--keyword", "已解决"), [])
+        # 标题描述条件与备注条件互斥时为空
+        self.assertEqual(
+            self.list_tickets(
+                "--keyword", "第二张", "--note-keyword", "等待确认"
+            ),
+            [],
+        )
+
+    # ---------- 空结果 ----------
+
+    def test_note_keyword_without_hit_returns_empty_array(self):
+        result = self.run_cli("list", "--note-keyword", "不存在的内容")
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stderr, "")
+        self.assertEqual(result.stdout.strip(), "[]")
+
+    def test_ticket_without_notes_is_excluded(self):
+        # 新建一张没有备注的工单，不应因备注查询入选
+        created = self.run_cli(
+            "create", "--title", "登录问题", "--description", "第三张"
+        )
+        self.assertEqual(created.returncode, 0, created.stderr)
+        tickets = self.list_tickets("--note-keyword", "等待确认")
+        self.assertEqual(tickets, self.expected_tickets([0]))
+
+    # ---------- 字面子串与大小写 ----------
+
+    def test_note_keyword_special_characters_are_literal(self):
+        tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(tmpdir.cleanup)
+        db_path = str(Path(tmpdir.name) / "special.sqlite")
+
+        def run_cli(*args):
+            return subprocess.run(
+                [sys.executable, str(MAIN_PY), "--db", db_path, *args],
+                capture_output=True,
+                text=True,
+            )
+
+        self.assertEqual(run_cli("create", "--title", "t", "--description", "").returncode, 0)
+        self.assertEqual(
+            run_cli("add-note", "1", "--text", '100%done a_b\\c"q\'z  空格').returncode,
+            0,
+        )
+        parse = ListCommandTestCase.parse_single_json_array
+        self.assertEqual(parse(run_cli("list", "--note-keyword", "100%x").stdout), [])
+        self.assertEqual(len(parse(run_cli("list", "--note-keyword", "100%").stdout)), 1)
+        self.assertEqual(len(parse(run_cli("list", "--note-keyword", "a_b").stdout)), 1)
+        self.assertEqual(len(parse(run_cli("list", "--note-keyword", "\\c").stdout)), 1)
+        self.assertEqual(len(parse(run_cli("list", "--note-keyword", '"q').stdout)), 1)
+        # 内部连续空白按原字符比较
+        self.assertEqual(len(parse(run_cli("list", "--note-keyword", "z  空").stdout)), 1)
+        self.assertEqual(len(parse(run_cli("list", "--note-keyword", "z 空").stdout)), 0)
+
+    def test_note_keyword_match_is_case_sensitive(self):
+        tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(tmpdir.cleanup)
+        db_path = str(Path(tmpdir.name) / "case.sqlite")
+
+        def run_cli(*args):
+            return subprocess.run(
+                [sys.executable, str(MAIN_PY), "--db", db_path, *args],
+                capture_output=True,
+                text=True,
+            )
+
+        self.assertEqual(run_cli("create", "--title", "a", "--description", "").returncode, 0)
+        self.assertEqual(run_cli("create", "--title", "b", "--description", "").returncode, 0)
+        self.assertEqual(run_cli("add-note", "1", "--text", "LOG").returncode, 0)
+        self.assertEqual(run_cli("add-note", "2", "--text", "log").returncode, 0)
+        parse = ListCommandTestCase.parse_single_json_array
+        self.assertEqual(
+            [t["id"] for t in parse(run_cli("list", "--note-keyword", "LOG").stdout)],
+            [1],
+        )
+        self.assertEqual(
+            [t["id"] for t in parse(run_cli("list", "--note-keyword", "log").stdout)],
+            [2],
+        )
+
+    # ---------- 空关键字 ----------
+
+    def test_empty_note_keyword_exits_1_with_fixed_message(self):
+        for keyword in ("", "   ", "\t \n"):
+            with self.subTest(keyword=keyword):
+                result = self.run_cli("list", "--note-keyword", keyword)
+                self.assertEqual(result.returncode, 1)
+                self.assertEqual(result.stdout, "")
+                self.assertEqual(result.stderr, "关键字不能为空\n")
+                self.assert_storage_unchanged()
+
+    # ---------- 参数用法错误 ----------
+
+    def test_note_keyword_missing_value_exits_2(self):
+        result = self.run_cli("list", "--note-keyword")
+        self.assertEqual(result.returncode, 2)
+        self.assertEqual(result.stdout, "")
+        self.assertIn("usage", result.stderr.lower())
+
+    # ---------- 只读与可重复性 ----------
+
+    def test_note_keyword_query_is_repeatable_and_read_only(self):
+        first = self.list_tickets("--note-keyword", " 等待确认 ")
+        second = self.list_tickets("--note-keyword", " 等待确认 ")
+        self.assertEqual(first, self.expected_tickets([0]))
+        self.assertEqual(second, first)
+        self.assert_storage_unchanged()
+
+        for argv in (
+            ("list", "--note-keyword", "等待确认"),
+            ("list", "--note-keyword", "不存在"),
+            ("list", "--note-keyword", ""),
+            ("list", "--note-keyword", "等待确认", "--status", "closed"),
+            ("list", "--note-keyword", "等待确认", "--keyword", "登录问题"),
+        ):
+            self.run_cli(*argv)
+            self.assert_storage_unchanged()
+
+
 class EmptyDatabaseListTestCase(unittest.TestCase):
     """空库上的 list 查询。"""
 
@@ -507,6 +782,16 @@ class EmptyDatabaseListTestCase(unittest.TestCase):
             ("list", "--status", "closed"),
             ("list", "--keyword", "登录"),
             ("list", "--keyword", "登录", "--status", "open"),
+            ("list", "--note-keyword", "登录"),
+            (
+                "list",
+                "--note-keyword",
+                "登录",
+                "--keyword",
+                "x",
+                "--status",
+                "open",
+            ),
         ):
             with self.subTest(argv=argv):
                 result = self.run_cli(*argv)
