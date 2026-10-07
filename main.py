@@ -316,7 +316,7 @@ def summary_ticket(conn, raw_id):
     return 0
 
 
-def list_tickets(conn, status, keyword, note_keyword=None, limit=None):
+def list_tickets(conn, status, keyword, note_keyword=None, limit=None, after_id=None):
     # 关键字先去除首尾空白；显式传入空字符串或去除后为空时，
     # 按使用错误处理（退出码 1），不进入查询
     if keyword is not None:
@@ -329,6 +329,12 @@ def list_tickets(conn, status, keyword, note_keyword=None, limit=None):
         if not note_keyword:
             print("关键字不能为空", file=sys.stderr)
             return 1
+
+    # 游标只是编号边界：超过 SQLite 可保存的最大整数时不可能有编号
+    # 严格大于它的记录，直接返回空数组，避免绑定参数触发 OverflowError
+    if after_id is not None and after_id > SQLITE_MAX_INT:
+        print("[]")
+        return 0
 
     query = "SELECT id, title, description, status FROM tickets"
     conditions = []
@@ -350,6 +356,11 @@ def list_tickets(conn, status, keyword, note_keyword=None, limit=None):
             "AND instr(ticket_notes.text, ?) > 0)"
         )
         params.append(note_keyword)
+    if after_id:
+        # 游标与原有筛选条件取交集：只保留编号严格大于游标的工单；
+        # 0 等价于未设置边界，不附加条件。游标不要求对应工单存在
+        conditions.append("id > ?")
+        params.append(after_id)
     if conditions:
         query += " WHERE " + " AND ".join(conditions)
     query += " ORDER BY id"
@@ -388,6 +399,23 @@ def positive_limit(raw):
         raise argparse.ArgumentTypeError("必须为正整数")
     if value <= 0:
         raise argparse.ArgumentTypeError("必须为正整数")
+    return value
+
+
+def non_negative_cursor(raw):
+    """解析 list --after-id 的游标：按 Python int() 规则，非负整数有效。
+
+    允许正号、前导零与首尾空白（与 int() 自身规则一致）；0 等价于未设置
+    边界。负数、小数、无法解析的文本或空字符串均抛错，由 argparse 按用法
+    错误处理（退出码 2）。返回 Python 任意精度 int，即便超过 SQLite
+    有符号整数上限也能在查询前按“无更大编号”语义成功处理。
+    """
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        raise argparse.ArgumentTypeError("必须为非负整数")
+    if value < 0:
+        raise argparse.ArgumentTypeError("必须为非负整数")
     return value
 
 
@@ -466,6 +494,15 @@ def build_parser():
         help="只返回匹配工单中编号最小的前若干张（正整数，允许正号、"
         "前导零与首尾空白）；不传则返回全部匹配工单",
     )
+    list_parser.add_argument(
+        "--after-id",
+        default=None,
+        type=non_negative_cursor,
+        dest="after_id",
+        help="只返回编号严格大于该值的匹配工单（非负整数，允许正号、"
+        "前导零与首尾空白；0 等价于未设置边界）；用于从上次返回的"
+        "最后一个编号继续翻页，在 --limit 之前生效",
+    )
 
     return parser
 
@@ -494,7 +531,12 @@ def main(argv=None):
             return summary_ticket(conn, args.id)
         if args.command == "list":
             return list_tickets(
-                conn, args.status, args.keyword, args.note_keyword, args.limit
+                conn,
+                args.status,
+                args.keyword,
+                args.note_keyword,
+                args.limit,
+                args.after_id,
             )
         return 1
     finally:
