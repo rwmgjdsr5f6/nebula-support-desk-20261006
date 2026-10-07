@@ -328,6 +328,27 @@ def get_draft(conn, raw_id):
     return 0
 
 
+def clear_draft(conn, raw_id):
+    """清除工单当前的回复草稿；本来没有草稿或重复清除同样成功。
+
+    仅删除该工单在 ticket_drafts 中的行（若存在），不触碰工单本身与其他
+    工单；成功后统一返回 text 为 null 的草稿对象，不用空串或占位内容代替。
+    """
+    row = find_ticket(conn, raw_id)
+    if row is None:
+        return 1
+
+    ticket_id = row[0]
+    conn.execute(
+        "DELETE FROM ticket_drafts WHERE ticket_id = ?",
+        (ticket_id,),
+    )
+    conn.commit()
+
+    print(json.dumps(draft_to_dict(ticket_id, None), ensure_ascii=False))
+    return 0
+
+
 def summary_ticket(conn, raw_id):
     """一次查询输出工单当前状态与已有处理记录的摘要；只读操作。
 
@@ -533,6 +554,11 @@ def build_parser():
     draft_parser = subparsers.add_parser("draft", help="按编号读取工单的回复草稿")
     draft_parser.add_argument("id", help="工单编号（正整数）")
 
+    clear_draft_parser = subparsers.add_parser(
+        "clear-draft", help="清除工单当前的回复草稿"
+    )
+    clear_draft_parser.add_argument("id", help="工单编号（正整数）")
+
     summary_parser = subparsers.add_parser(
         "summary", help="按编号读取工单处理摘要"
     )
@@ -600,6 +626,8 @@ def main(argv=None):
             return set_draft(conn, args.id, args.text)
         if args.command == "draft":
             return get_draft(conn, args.id)
+        if args.command == "clear-draft":
+            return clear_draft(conn, args.id)
         if args.command == "summary":
             return summary_ticket(conn, args.id)
         if args.command == "list":
