@@ -14,9 +14,20 @@ DEFAULT_DB = "tickets.sqlite"
 SQLITE_MAX_INT = 9223372036854775807
 
 
+class DatabaseOpenError(Exception):
+    """数据库文件无法打开（如父目录不存在或路径指向一个目录）。"""
+
+
 def connect(db_path):
-    """打开（必要时创建）数据库并确保工单表存在。"""
-    conn = sqlite3.connect(db_path)
+    """打开（必要时创建）数据库并确保工单表存在。
+
+    仅在打开数据库文件这一步失败时抛出 DatabaseOpenError；
+    建表等后续 SQL 执行的异常不在此转换，按原样抛出。
+    """
+    try:
+        conn = sqlite3.connect(db_path)
+    except sqlite3.Error as exc:
+        raise DatabaseOpenError(db_path) from exc
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS tickets (
@@ -618,7 +629,14 @@ def main(argv=None):
     parser = build_parser()
     args = parser.parse_args(argv)
 
-    conn = connect(args.db)
+    # 参数解析通过后先打开数据库：文件无法打开（如父目录不存在或
+    # --db 指向目录）时以退出码 1 结束，不执行任何工单查询或处理，
+    # 也不创建缺失的目录或改用其他位置
+    try:
+        conn = connect(args.db)
+    except DatabaseOpenError:
+        print("数据库无法打开", file=sys.stderr)
+        return 1
     try:
         if args.command == "create":
             return create_ticket(conn, args.title, args.description)
