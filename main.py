@@ -481,7 +481,7 @@ def summary_ticket(conn, raw_id, include_draft=False):
 
 def list_tickets(
     conn, status, keyword, note_keyword=None, limit=None, after_id=None,
-    has_draft=False,
+    has_draft=False, priority=None,
 ):
     # 关键字先去除首尾空白；显式传入空字符串或去除后为空时，
     # 按使用错误处理（退出码 1），不进入查询
@@ -508,6 +508,15 @@ def list_tickets(
     if status is not None:
         conditions.append("status = ?")
         params.append(status)
+    if priority is not None:
+        # 按当前等级筛选：优先级表无行的工单（含旧库工单与从未设置的新工单）
+        # 一律按 normal 匹配，显式设为 normal 者同样入选；查询只读，
+        # 不为缺失等级补写默认记录。等级参数已由 argparse 限定为合法取值
+        conditions.append(
+            "COALESCE((SELECT priority FROM ticket_priorities "
+            "WHERE ticket_priorities.ticket_id = tickets.id), ?) = ?"
+        )
+        params.extend((DEFAULT_PRIORITY, priority))
     if keyword:
         # 用 instr 做区分大小写的连续字面子串匹配：关键字作为绑定参数，
         # 其中的 %、_、\、引号与内部空白均按原字符比较，不作为通配符
@@ -689,6 +698,14 @@ def build_parser():
         help="按状态筛选（open 或 closed；不传则返回全部工单）",
     )
     list_parser.add_argument(
+        "--priority",
+        choices=PRIORITIES,
+        default=None,
+        help="按当前优先级筛选（区分大小写，仅接受 low、normal、high；"
+        "不修剪首尾空白）；从未设置等级的工单按 normal 匹配。"
+        "不传则不按等级筛选",
+    )
+    list_parser.add_argument(
         "--keyword",
         default=None,
         help="按标题或描述中的连续关键字筛选（区分大小写的字面子串匹配）",
@@ -774,6 +791,7 @@ def main(argv=None):
                 args.limit,
                 args.after_id,
                 args.has_draft,
+                args.priority,
             )
         return 1
     finally:
