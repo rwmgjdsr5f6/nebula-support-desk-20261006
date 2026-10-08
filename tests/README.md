@@ -7,6 +7,7 @@
 - `test_history.py`：`history` 命令及结案/重开历史写入规则的回归测试。
 - `test_list.py`：`list` 命令的回归测试。
 - `test_list_limit.py`：`list --limit` 返回数量控制的回归测试。
+- `test_db_open_failure.py`：数据库文件无法打开（父目录不存在、`--db` 指向已存在目录）时退出码 1、标准输出为空、标准错误仅为 `数据库无法打开`，以及参数用法错误优先退出 2 的回归测试。
 
 ## 运行
 
