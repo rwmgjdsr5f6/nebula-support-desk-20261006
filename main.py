@@ -83,6 +83,18 @@ def connect(db_path):
         )
         """
     )
+    # 优先级独立成表：每张工单至多一行，未设置的工单查询时按 normal 返回。
+    # 设置时整篇覆盖为最新等级，不保留变更历史
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS ticket_priorities (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ticket_id INTEGER NOT NULL,
+            priority TEXT NOT NULL,
+            UNIQUE (ticket_id)
+        )
+        """
+    )
     conn.commit()
     return conn
 
@@ -367,6 +379,56 @@ def clear_draft(conn, raw_id):
     return 0
 
 
+# 优先级仅接受区分大小写的三个等级；未设置时查询统一按 normal 返回
+PRIORITIES = ("low", "normal", "high")
+DEFAULT_PRIORITY = "normal"
+
+
+def priority_to_dict(ticket_id, priority):
+    """构造对外输出的优先级字典：仅含 ticket_id、priority。"""
+    return {"ticket_id": ticket_id, "priority": priority}
+
+
+def set_priority(conn, raw_id, priority):
+    """确认工单存在后保存其优先级：覆盖该工单此前的等级，不保留版本。
+
+    仅改变指定工单的等级，不追加状态历史，也不改变标题、描述、状态、
+    备注或回复草稿；open 与 closed 工单均可设置，重复设置相同等级
+    同样成功。
+    """
+    row = find_ticket(conn, raw_id)
+    if row is None:
+        return 1
+
+    ticket_id = row[0]
+    conn.execute(
+        "INSERT OR REPLACE INTO ticket_priorities (ticket_id, priority) "
+        "VALUES (?, ?)",
+        (ticket_id, priority),
+    )
+    conn.commit()
+
+    print(json.dumps(priority_to_dict(ticket_id, priority), ensure_ascii=False))
+    return 0
+
+
+def get_priority(conn, raw_id):
+    """读取工单当前的优先级；工单存在但从未设置时返回 normal。只读操作。"""
+    row = find_ticket(conn, raw_id)
+    if row is None:
+        return 1
+
+    ticket_id = row[0]
+    priority_row = conn.execute(
+        "SELECT priority FROM ticket_priorities WHERE ticket_id = ?",
+        (ticket_id,),
+    ).fetchone()
+    priority = DEFAULT_PRIORITY if priority_row is None else priority_row[0]
+
+    print(json.dumps(priority_to_dict(ticket_id, priority), ensure_ascii=False))
+    return 0
+
+
 def summary_ticket(conn, raw_id, include_draft=False):
     """一次查询输出工单当前状态与已有处理记录的摘要；只读操作。
 
@@ -593,6 +655,22 @@ def build_parser():
     )
     clear_draft_parser.add_argument("id", help="工单编号（正整数）")
 
+    set_priority_parser = subparsers.add_parser(
+        "set-priority", help="设置工单的优先级"
+    )
+    set_priority_parser.add_argument("id", help="工单编号（正整数）")
+    set_priority_parser.add_argument(
+        "--value",
+        required=True,
+        choices=PRIORITIES,
+        help="优先级等级（区分大小写，仅接受 low、normal、high）",
+    )
+
+    priority_parser = subparsers.add_parser(
+        "priority", help="按编号读取工单的优先级"
+    )
+    priority_parser.add_argument("id", help="工单编号（正整数）")
+
     summary_parser = subparsers.add_parser(
         "summary", help="按编号读取工单处理摘要"
     )
@@ -681,6 +759,10 @@ def main(argv=None):
             return get_draft(conn, args.id)
         if args.command == "clear-draft":
             return clear_draft(conn, args.id)
+        if args.command == "set-priority":
+            return set_priority(conn, args.id, args.value)
+        if args.command == "priority":
+            return get_priority(conn, args.id)
         if args.command == "summary":
             return summary_ticket(conn, args.id, args.include_draft)
         if args.command == "list":
