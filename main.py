@@ -417,7 +417,10 @@ def summary_ticket(conn, raw_id, include_draft=False):
     return 0
 
 
-def list_tickets(conn, status, keyword, note_keyword=None, limit=None, after_id=None):
+def list_tickets(
+    conn, status, keyword, note_keyword=None, limit=None, after_id=None,
+    has_draft=False,
+):
     # 关键字先去除首尾空白；显式传入空字符串或去除后为空时，
     # 按使用错误处理（退出码 1），不进入查询
     if keyword is not None:
@@ -457,6 +460,13 @@ def list_tickets(conn, status, keyword, note_keyword=None, limit=None, after_id=
             "AND instr(ticket_notes.text, ?) > 0)"
         )
         params.append(note_keyword)
+    if has_draft:
+        # 草稿存在性条件取 EXISTS：只要该工单当前保存有草稿行即入选，
+        # 与草稿正文内容无关；每张工单至多一份草稿，覆盖保存不会重复入选
+        conditions.append(
+            "EXISTS (SELECT 1 FROM ticket_drafts "
+            "WHERE ticket_drafts.ticket_id = tickets.id)"
+        )
     if after_id:
         # 游标与原有筛选条件取交集：只保留编号严格大于游标的工单；
         # 0 等价于未设置边界，不附加条件。游标不要求对应工单存在
@@ -612,6 +622,12 @@ def build_parser():
         "（区分大小写的字面子串匹配）；与 --status、--keyword 取交集",
     )
     list_parser.add_argument(
+        "--has-draft",
+        action="store_true",
+        help="只返回当前保存了回复草稿的工单（不接收参数值；与 --status、"
+        "--keyword、--note-keyword、--after-id 取交集，在 --limit 之前生效）",
+    )
+    list_parser.add_argument(
         "--limit",
         default=None,
         type=positive_limit,
@@ -675,6 +691,7 @@ def main(argv=None):
                 args.note_keyword,
                 args.limit,
                 args.after_id,
+                args.has_draft,
             )
         return 1
     finally:
