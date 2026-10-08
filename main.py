@@ -481,7 +481,7 @@ def summary_ticket(conn, raw_id, include_draft=False):
 
 def list_tickets(
     conn, status, keyword, note_keyword=None, limit=None, after_id=None,
-    has_draft=False,
+    has_draft=False, priority=None,
 ):
     # 关键字先去除首尾空白；显式传入空字符串或去除后为空时，
     # 按使用错误处理（退出码 1），不进入查询
@@ -529,6 +529,14 @@ def list_tickets(
             "EXISTS (SELECT 1 FROM ticket_drafts "
             "WHERE ticket_drafts.ticket_id = tickets.id)"
         )
+    if priority is not None:
+        # 优先级按当前等级筛选：从未设置过等级的工单按 normal 匹配，
+        # 显式设为 normal 的同样入选；只读查询，不补写默认等级记录
+        conditions.append(
+            "COALESCE((SELECT priority FROM ticket_priorities "
+            "WHERE ticket_priorities.ticket_id = tickets.id), ?) = ?"
+        )
+        params.extend((DEFAULT_PRIORITY, priority))
     if after_id:
         # 游标与原有筛选条件取交集：只保留编号严格大于游标的工单；
         # 0 等价于未设置边界，不附加条件。游标不要求对应工单存在
@@ -706,6 +714,14 @@ def build_parser():
         "--keyword、--note-keyword、--after-id 取交集，在 --limit 之前生效）",
     )
     list_parser.add_argument(
+        "--priority",
+        default=None,
+        choices=PRIORITIES,
+        help="按优先级筛选（区分大小写，仅接受 low、normal、high；未设置等级的"
+        "工单按 normal 匹配）；不传则返回全部工单，与其他筛选条件取交集，"
+        "在 --limit 之前生效",
+    )
+    list_parser.add_argument(
         "--limit",
         default=None,
         type=positive_limit,
@@ -774,6 +790,7 @@ def main(argv=None):
                 args.limit,
                 args.after_id,
                 args.has_draft,
+                args.priority,
             )
         return 1
     finally:
